@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  html,
+  body,
+  #app {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    background-color: #f1f5f9; /* slate-100 */
+    color: #1e293b; /* slate-800 */
+    -webkit-font-smoothing: antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", sans-serif;
+  }
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0; /* slate-200 */
+    background-color: #ffffff;
+    color: #334155; /* slate-700 */
+    padding: 6px 12px;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease,
+      color 0.15s ease;
+    user-select: none;
+  }
+  button:hover:not(:disabled) {
+    border-color: #3b82f6; /* blue-500 */
+    color: #1d4ed8; /* blue-700 */
+  }
+  button.primary {
+    background-color: #2563eb; /* blue-600 */
+    border-color: #2563eb;
+    color: #ffffff;
+  }
+  button.primary:hover {
+    background-color: #1d4ed8; /* blue-700 */
+    border-color: #1d4ed8;
+  }
+  button.danger {
+    background-color: #e11d48; /* rose-600 */
+    border-color: #e11d48;
+    color: #ffffff;
+  }
+  button.danger:hover {
+    background-color: #be123c; /* rose-700 */
+    border-color: #be123c;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  input,
+  select,
+  textarea {
+    font-size: 13px;
+    border-radius: 8px;
+    border: 1px solid #e2e8f0;
+    padding: 6px 10px;
+    outline: none;
+    background-color: #ffffff;
+    color: #1e293b;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: #cbd5e1; /* slate-300 */
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: #94a3b8; /* slate-400 */
+  }
+}
+
+/* 无边框窗口：拖拽区与窗口控制按钮（app-region 非 Tailwind 工具类，用纯 CSS） */
+.drag-region {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+.win-btn {
+  -webkit-app-region: no-drag;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: #ffffff;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  transition: background-color 0.15s ease;
+}
+.win-btn:hover {
+  background-color: rgba(255, 255, 255, 0.18);
+}
+.win-close:hover {
+  background-color: #e11d48; /* rose-600 */
+}
