@@ -26,7 +26,9 @@
               <div class="font-medium text-slate-800">{{ t.name }}</div>
               <div class="text-[12px] text-slate-400">{{ t.ip }}</div>
             </div>
-            <button class="primary ml-auto" @click="join(t)">进入</button>
+            <el-button type="primary" class="ml-auto" @click="join(t)">
+              <el-icon class="mr-1"><Right /></el-icon>进入
+            </el-button>
           </div>
         </div>
         <p v-else class="text-slate-400 text-[13px] leading-relaxed">
@@ -48,7 +50,9 @@
         </div>
 
         <div class="flex gap-2 mt-3">
-          <button class="danger" @click="leave">离开广播</button>
+          <el-button type="danger" @click="leave">
+            <el-icon class="mr-1"><SwitchButton /></el-icon>离开广播
+          </el-button>
         </div>
       </div>
 
@@ -58,27 +62,38 @@
           以<strong class="text-slate-700">老师</strong>身份广播你的屏幕。
         </p>
 
-        <div class="flex gap-2 mt-3 items-center">
-          <select v-model="selectedSource" class="flex-1 min-w-0" :disabled="store.broadcast.teacherActive">
-            <option v-for="s in store.sources" :key="s.id" :value="s.id">
-              {{ s.name }}
-            </option>
-          </select>
-          <button
-            class="primary flex-none whitespace-nowrap"
-            @click="start"
-            :disabled="busy || !selectedSource"
+        <div class="mt-3 flex gap-2 items-center">
+          <el-select
+            v-model="selectedSource"
+            class="flex-1 min-w-0"
+            placeholder="选择要分享的画面"
+            :disabled="store.broadcast.teacherActive"
+          >
+            <el-option
+              v-for="s in store.sources"
+              :key="s.id"
+              :label="s.name"
+              :value="s.id"
+            />
+          </el-select>
+          <el-button
             v-if="!store.broadcast.teacherActive"
+            type="primary"
+            class="flex-none"
+            :loading="busy"
+            :disabled="!selectedSource"
+            @click="start"
           >
-            开始广播
-          </button>
-          <button
-            class="danger flex-none whitespace-nowrap"
+            <el-icon class="mr-1"><VideoCamera /></el-icon>开始广播
+          </el-button>
+          <el-button
+            v-else
+            type="danger"
+            class="flex-none"
             @click="stop"
-            v-if="store.broadcast.teacherActive"
           >
-            停止广播
-          </button>
+            <el-icon class="mr-1"><VideoPause /></el-icon>停止广播
+          </el-button>
         </div>
 
         <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
@@ -103,7 +118,9 @@
               <div class="font-medium text-slate-800">{{ t.name }}</div>
               <div class="text-[12px] text-slate-400">{{ t.ip }}</div>
             </div>
-            <button class="primary ml-auto" @click="join(t)">进入</button>
+            <el-button type="primary" class="ml-auto" @click="join(t)">
+              <el-icon class="mr-1"><Right /></el-icon>进入
+            </el-button>
           </div>
         </div>
 

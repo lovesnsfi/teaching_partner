@@ -7,13 +7,16 @@
       <span class="text-[13px] text-slate-400"
         >→ {{ store.activeName || '未选择' }}</span
       >
-      <button
+      <el-button
         v-if="store.isGroupActive"
-        class="ml-auto text-[12px] px-2 py-0.5 text-rose-600 border-rose-200 hover:bg-rose-50"
+        class="ml-auto"
+        size="small"
+        type="danger"
+        plain
         @click="store.leaveGroup(store.activeChatId)"
       >
-        退群
-      </button>
+        <el-icon class="mr-1"><Remove /></el-icon>退群
+      </el-button>
     </div>
 
     <div class="flex-1 overflow-auto p-4 space-y-3" ref="listEl">
@@ -66,11 +69,27 @@
                 </div>
               </div>
               <div
-                class="flex gap-2 ml-auto flex-none"
+                class="flex gap-1 ml-auto flex-none"
                 v-if="m.file?.path && !m.receiving"
               >
-                <button @click="open(m.file.path)">打开</button>
-                <button @click="openFolder(m.file.path)">文件夹</button>
+                <el-button
+                  size="small"
+                  text
+                  bg
+                  title="打开文件"
+                  @click="open(m.file.path)"
+                >
+                  打开
+                </el-button>
+                <el-button
+                  size="small"
+                  text
+                  bg
+                  title="在文件夹中显示"
+                  @click="openFolder(m.file.path)"
+                >
+                  文件夹
+                </el-button>
               </div>
             </div>
 
@@ -105,31 +124,30 @@
       class="relative flex items-center gap-1 p-2.5 border-t border-slate-200 flex-none"
       v-if="store.activeChatId"
     >
-      <span
-        class="w-8 h-8 grid place-items-center text-[16px] rounded-lg hover:bg-slate-100 cursor-pointer select-none"
-        title="表情"
-        @click="togglePicker('emoji')"
-        >😊</span
-      >
-      <span
-        class="w-8 h-8 grid place-items-center text-[16px] rounded-lg hover:bg-slate-100 cursor-pointer select-none"
-        title="贴纸"
-        @click="togglePicker('sticker')"
-        >🖼️</span
-      >
-      <span
-        class="w-8 h-8 grid place-items-center text-[16px] rounded-lg hover:bg-slate-100 cursor-pointer select-none"
-        title="发送文件"
-        @click="store.sendFileFromPicker()"
-        >📎</span
-      >
-      <input
+      <el-tooltip content="表情" placement="top">
+        <el-button text size="small" @click="togglePicker('emoji')">
+          <el-icon><ChatRound /></el-icon>
+        </el-button>
+      </el-tooltip>
+      <el-tooltip content="贴纸" placement="top">
+        <el-button text size="small" @click="togglePicker('sticker')">
+          <el-icon><PictureFilled /></el-icon>
+        </el-button>
+      </el-tooltip>
+      <el-tooltip content="发送文件" placement="top">
+        <el-button text size="small" @click="store.sendFileFromPicker()">
+          <el-icon><Paperclip /></el-icon>
+        </el-button>
+      </el-tooltip>
+      <el-input
         v-model="text"
         @keyup.enter="send"
         placeholder="输入消息，回车发送"
         class="flex-1"
       />
-      <button class="primary" @click="send">发送</button>
+      <el-button type="primary" @click="send">
+        <el-icon class="mr-1"><Promotion /></el-icon>发送
+      </el-button>
       <EmojiPicker
         v-if="showPicker"
         :initial-tab="pickerTab"

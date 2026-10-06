@@ -52,9 +52,14 @@
       >
         群聊
         <span>({{ store.groups.length }})</span>
-        <button class="primary ml-auto text-[12px] px-2 py-0.5" @click="showModal = true">
-          ＋ 新建
-        </button>
+        <el-button
+          type="primary"
+          size="small"
+          class="ml-auto"
+          @click="showModal = true"
+        >
+          <el-icon class="mr-1"><Plus /></el-icon>新建
+        </el-button>
       </div>
 
       <div

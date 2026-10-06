@@ -3,47 +3,112 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 
 const MAX_PER_CONV = 400
 
-// 创建本地持久化后端：
-//   优先 SQLite（better-sqlite3）：kv(设置) / groups(群) / messages(聊天) 三张表
-//   若 better-sqlite3 未安装，则自动降级为 userData 下的 JSON 文件（同为"本地持久化存储方案"）
-// 两者对外接口完全一致，store 层无需感知差异。
+// 建表语句逐条执行，保证「原生 SQLite」与「WASM SQLite」两种后端行为一致
+const DDL = [
+  'CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)',
+  `CREATE TABLE IF NOT EXISTS groups (
+     id TEXT PRIMARY KEY, name TEXT, ownerId TEXT, members TEXT, createdAt INTEGER
+   )`,
+  `CREATE TABLE IF NOT EXISTS messages (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     convId TEXT NOT NULL,
+     ts INTEGER, fromId TEXT, fromName TEXT, fromAvatar TEXT,
+     kind TEXT, text TEXT, sticker TEXT,
+     fileId TEXT, fileJson TEXT,
+     mine INTEGER, receiving INTEGER, sending INTEGER
+   )`,
+  'CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(convId)'
+]
+
+/**
+ * 创建本地持久化后端，按优先级依次尝试：
+ *   1) better-sqlite3（原生 SQLite，性能最佳）—— 需针对 Electron ABI 编译（Windows 需 VS 生成工具）
+ *   2) node-sqlite3-wasm（WebAssembly SQLite，零编译）—— Node/Electron 通用，推荐默认
+ *   3) JSON 文件（最后兜底）
+ * 三者对外接口完全一致，store 层无需感知差异。
+ */
 export async function createPersistence(userDataDir) {
+  const dbFile = join(userDataDir, 'lan-chat.db')
+  const reasons = []
+
+  // 1) 原生 SQLite
   try {
-    const mod = await import('better-sqlite3')
-    const Database = mod.default || mod
-    const db = new Database(join(userDataDir, 'lan-chat.db'))
-    db.pragma('journal_mode = WAL')
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
-      CREATE TABLE IF NOT EXISTS groups (
-        id TEXT PRIMARY KEY, name TEXT, ownerId TEXT, members TEXT, createdAt INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        convId TEXT NOT NULL,
-        ts INTEGER,
-        fromId TEXT,
-        fromName TEXT,
-        fromAvatar TEXT,
-        kind TEXT,
-        text TEXT,
-        sticker TEXT,
-        fileId TEXT,
-        fileJson TEXT,
-        mine INTEGER,
-        receiving INTEGER,
-        sending INTEGER
-      );
-      CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(convId);
-    `)
-    console.log('[persist] 使用 SQLite 存储 (better-sqlite3)')
+    const db = await openNative(dbFile)
+    console.log('[persist] 持久化后端：SQLite（better-sqlite3 原生）')
     return makeSqlite(db)
   } catch (e) {
-    console.warn(
-      '[persist] 未检测到 better-sqlite3，降级为 JSON 文件存储:',
-      (e && e.message) || e
-    )
-    return makeJson(join(userDataDir, 'lan-chat-data.json'))
+    reasons.push('better-sqlite3: ' + ((e && e.message) || e))
+  }
+
+  // 2) WASM SQLite（免编译，Electron 场景首选）
+  try {
+    const db = await openWasm(dbFile)
+    console.log('[persist] 持久化后端：SQLite（node-sqlite3-wasm，免编译）')
+    return makeSqlite(db)
+  } catch (e) {
+    reasons.push('node-sqlite3-wasm: ' + ((e && e.message) || e))
+  }
+
+  // 3) JSON 兜底
+  console.warn(
+    '[persist] SQLite 均不可用，降级为 JSON 文件存储。原因：' + reasons.join(' | ')
+  )
+  return makeJson(join(userDataDir, 'lan-chat-data.json'))
+}
+
+function toArr(params) {
+  if (params === undefined || params === null) return []
+  return Array.isArray(params) ? params : [params]
+}
+
+// ---- 后端适配：把不同 SQLite 驱动统一成 exec/run/get/all/transaction ----
+
+async function openNative(file) {
+  const mod = await import('better-sqlite3')
+  const Database = mod.default || mod
+  const raw = new Database(file)
+  raw.pragma('journal_mode = WAL')
+  for (const sql of DDL) raw.exec(sql)
+  return {
+    exec: (sql) => raw.exec(sql),
+    run: (sql, params) => raw.prepare(sql).run(...toArr(params)),
+    get: (sql, params) => raw.prepare(sql).get(...toArr(params)),
+    all: (sql, params) => raw.prepare(sql).all(...toArr(params)),
+    transaction: (fn) => raw.transaction(fn)()
+  }
+}
+
+async function openWasm(file) {
+  const mod = await import('node-sqlite3-wasm')
+  // 该包是 CJS，用 ESM 动态导入时具名导出未必可用（实际挂载在 default 上），需兼容两种形态
+  const lib = (mod && mod.default) || mod
+  const Database = lib && lib.Database
+  if (typeof Database !== 'function') {
+    throw new Error('node-sqlite3-wasm 未导出 Database')
+  }
+  const raw = new Database(file)
+  for (const sql of DDL) raw.run(sql)
+  return {
+    exec: (sql) => raw.run(sql),
+    run: (sql, params) => raw.run(sql, toArr(params)),
+    get: (sql, params) => raw.get(sql, toArr(params)),
+    all: (sql, params) => raw.all(sql, toArr(params)),
+    // WASM 版没有内置事务 API，用 BEGIN/COMMIT 手工实现
+    transaction: (fn) => {
+      raw.run('BEGIN')
+      try {
+        const r = fn()
+        raw.run('COMMIT')
+        return r
+      } catch (e) {
+        try {
+          raw.run('ROLLBACK')
+        } catch {
+          /* ignore */
+        }
+        throw e
+      }
+    }
   }
 }
 
@@ -65,42 +130,19 @@ function normalizeFileMsg(m) {
 }
 
 function makeSqlite(db) {
-  const getSettings = db.prepare('SELECT value FROM kv WHERE key=?')
-  const setSettings = db.prepare(
-    'INSERT OR REPLACE INTO kv(key,value) VALUES(?,?)'
-  )
-  const allGroups = db.prepare('SELECT * FROM groups')
-  const insGroup = db.prepare(
-    'INSERT OR REPLACE INTO groups(id,name,ownerId,members,createdAt) VALUES(?,?,?,?,?)'
-  )
-  const delGroups = db.prepare('DELETE FROM groups')
-  const allMsgs = db.prepare('SELECT * FROM messages ORDER BY id ASC')
-  const insMsg = db.prepare(
-    `INSERT INTO messages(convId,ts,fromId,fromName,fromAvatar,kind,text,sticker,fileId,fileJson,mine,receiving,sending)
-     VALUES(@convId,@ts,@fromId,@fromName,@fromAvatar,@kind,@text,@sticker,@fileId,@fileJson,@mine,@receiving,@sending)`
-  )
-  const countMsg = db.prepare(
-    'SELECT COUNT(*) AS c FROM messages WHERE convId=?'
-  )
-  const delMsg = db.prepare(
-    'DELETE FROM messages WHERE convId=? AND id IN (SELECT id FROM messages WHERE convId=? ORDER BY id ASC LIMIT ?)'
-  )
-  const updMsg = db.prepare(
-    'UPDATE messages SET fileJson=?, receiving=? WHERE convId=? AND fileId=?'
-  )
-
   return {
     load() {
-      const sRow = getSettings.get('settings')
+      const sRow = db.get('SELECT value FROM kv WHERE key = ?', ['settings'])
       const settings = sRow ? safeParse(sRow.value, {}) : {}
-      const groups = allGroups.all().map((r) => ({
+      const groups = db.all('SELECT * FROM groups').map((r) => ({
         id: r.id,
         name: r.name,
         ownerId: r.ownerId,
         members: safeParse(r.members, [])
       }))
       const messages = {}
-      for (const r of allMsgs.all()) {
+      const rows = db.all('SELECT * FROM messages ORDER BY id ASC')
+      for (const r of rows) {
         const arr = messages[r.convId] || (messages[r.convId] = [])
         arr.push(
           normalizeFileMsg({
@@ -122,51 +164,67 @@ function makeSqlite(db) {
       return { settings, groups, messages }
     },
     saveSettings(obj) {
-      setSettings.run('settings', JSON.stringify(obj || {}))
+      db.run('INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)', [
+        'settings',
+        JSON.stringify(obj || {})
+      ])
     },
     replaceGroups(groups) {
-      const tx = db.transaction((gs) => {
-        delGroups.run()
-        for (const g of gs) {
-          insGroup.run(
-            g.id,
-            g.name,
-            g.ownerId,
-            JSON.stringify(g.members || []),
-            g.createdAt || Date.now()
+      db.transaction(() => {
+        db.run('DELETE FROM groups')
+        for (const g of groups || []) {
+          db.run(
+            'INSERT OR REPLACE INTO groups(id, name, ownerId, members, createdAt) VALUES(?, ?, ?, ?, ?)',
+            [
+              g.id,
+              g.name,
+              g.ownerId,
+              JSON.stringify(g.members || []),
+              g.createdAt || Date.now()
+            ]
           )
         }
       })
-      tx(groups || [])
     },
     appendMessage(m) {
-      insMsg.run({
-        convId: m.convId,
-        ts: m.ts || Date.now(),
-        fromId: m.from || '',
-        fromName: m.fromName || '',
-        fromAvatar: m.fromAvatar || '',
-        kind: m.kind || 'text',
-        text: m.text || null,
-        sticker: m.sticker || null,
-        fileId: m.fileId || null,
-        fileJson: m.file ? JSON.stringify(m.file) : null,
-        mine: m.mine ? 1 : 0,
-        receiving: m.receiving ? 1 : 0,
-        sending: m.sending ? 1 : 0
-      })
+      db.run(
+        `INSERT INTO messages(convId, ts, fromId, fromName, fromAvatar, kind, text, sticker, fileId, fileJson, mine, receiving, sending)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          m.convId,
+          m.ts || Date.now(),
+          m.from || '',
+          m.fromName || '',
+          m.fromAvatar || '',
+          m.kind || 'text',
+          m.text || null,
+          m.sticker || null,
+          m.fileId || null,
+          m.file ? JSON.stringify(m.file) : null,
+          m.mine ? 1 : 0,
+          m.receiving ? 1 : 0,
+          m.sending ? 1 : 0
+        ]
+      )
       // 单会话条数上限，超出删最旧
-      const c = countMsg.get(m.convId).c
+      const row = db.get('SELECT COUNT(*) AS c FROM messages WHERE convId = ?', [
+        m.convId
+      ])
+      const c = row ? row.c : 0
       if (c > MAX_PER_CONV) {
-        delMsg.run(m.convId, m.convId, c - MAX_PER_CONV)
+        db.run(
+          `DELETE FROM messages
+           WHERE convId = ? AND id IN (
+             SELECT id FROM messages WHERE convId = ? ORDER BY id ASC LIMIT ?
+           )`,
+          [m.convId, m.convId, c - MAX_PER_CONV]
+        )
       }
     },
     updateMessage(p) {
-      updMsg.run(
-        JSON.stringify(p.file || null),
-        p.receiving ? 1 : 0,
-        p.convId,
-        p.fileId
+      db.run(
+        'UPDATE messages SET fileJson = ?, receiving = ? WHERE convId = ? AND fileId = ?',
+        [JSON.stringify(p.file || null), p.receiving ? 1 : 0, p.convId, p.fileId]
       )
     }
   }

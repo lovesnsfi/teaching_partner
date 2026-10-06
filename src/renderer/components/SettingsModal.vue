@@ -1,44 +1,53 @@
 <template>
   <div class="fixed inset-0 bg-black/40 grid place-items-center z-50">
+    <!-- 固定高度：切换类别时窗体高度保持不变，内容超出则在右侧区内部滚动 -->
     <div
-      class="bg-white rounded-2xl shadow-2xl w-[720px] max-h-[82vh] overflow-hidden flex flex-col"
+      class="bg-white rounded-2xl shadow-2xl w-[720px] h-[520px] max-h-[82vh] overflow-hidden flex flex-col"
     >
       <!-- 标题栏 -->
       <div
-        class="px-5 py-3.5 border-b border-slate-200 flex items-center gap-2 flex-none"
+        class="px-5 py-3 border-b border-slate-200 flex items-center gap-2 flex-none"
       >
         <span class="font-semibold text-[15px] text-slate-800">设置</span>
-        <button
-          class="ml-auto text-slate-400 hover:text-slate-600 text-[18px] leading-none"
+        <el-button
+          class="ml-auto"
+          text
+          size="small"
+          title="关闭"
           @click="$emit('close')"
         >
-          ✕
-        </button>
+          <el-icon><Close /></el-icon>
+        </el-button>
       </div>
 
       <!-- 左右分栏：左侧类别，右侧具体设置项 -->
       <div class="flex flex-1 min-h-0">
-        <!-- 左侧类别导航 -->
-        <nav
-          class="w-[168px] flex-none bg-slate-50 border-r border-slate-200 p-2 overflow-auto"
+        <!-- 左侧类别导航（Element Plus 菜单，自带选中态） -->
+        <el-menu
+          :default-active="activeTab"
+          class="w-[168px] flex-none border-r border-slate-200 overflow-auto"
+          @select="(key) => (activeTab = key)"
         >
-          <button
-            v-for="t in tabs"
-            :key="t.key"
-            class="w-full text-left px-3 py-2 rounded-lg text-[13px] mb-1 transition"
-            :class="
-              activeTab === t.key
-                ? 'bg-white text-slate-900 font-medium shadow-sm'
-                : 'text-slate-600 hover:bg-white/70'
-            "
-            @click="activeTab = t.key"
-          >
-            {{ t.label }}
-          </button>
-        </nav>
+          <el-menu-item index="profile">
+            <el-icon><User /></el-icon>
+            <span>个人资料</span>
+          </el-menu-item>
+          <el-menu-item index="network">
+            <el-icon><Connection /></el-icon>
+            <span>通信网卡</span>
+          </el-menu-item>
+          <el-menu-item index="broadcast">
+            <el-icon><Monitor /></el-icon>
+            <span>屏幕广播</span>
+          </el-menu-item>
+          <el-menu-item index="notify">
+            <el-icon><Bell /></el-icon>
+            <span>通知</span>
+          </el-menu-item>
+        </el-menu>
 
-        <!-- 右侧设置项 -->
-        <div class="flex-1 min-w-0 overflow-auto px-6 py-5">
+        <!-- 右侧设置项（固定高度内滚动，min-h-0 防止被内容撑开） -->
+        <div class="flex-1 min-w-0 min-h-0 overflow-auto px-6 py-5">
           <!-- ============ 个人资料 ============ -->
           <div v-if="activeTab === 'profile'">
             <div class="mb-4">
@@ -50,7 +59,9 @@
               </p>
             </div>
 
-            <div class="flex items-center gap-4 p-3 rounded-xl border border-slate-200">
+            <div
+              class="flex items-center gap-4 p-3 rounded-xl border border-slate-200"
+            >
               <Avatar
                 :avatar="draftAvatar"
                 :name="draftName || '我'"
@@ -58,11 +69,11 @@
               />
               <div class="flex-1 min-w-0">
                 <div class="text-[12px] text-slate-400 mb-1">昵称</div>
-                <input
+                <el-input
                   v-model="draftName"
                   maxlength="24"
+                  show-word-limit
                   placeholder="请输入昵称"
-                  class="w-full"
                 />
               </div>
             </div>
@@ -86,14 +97,16 @@
               </button>
             </div>
             <div class="flex items-center gap-2 mt-3">
-              <button class="text-[12px]" @click="pickLocal">选择本地图片</button>
-              <button
-                class="text-[12px]"
-                :class="!draftAvatar ? 'text-blue-600' : 'text-slate-500'"
+              <el-button size="small" @click="pickLocal">
+                <el-icon class="mr-1"><Picture /></el-icon>选择本地图片
+              </el-button>
+              <el-button
+                size="small"
+                :type="!draftAvatar ? 'primary' : 'default'"
                 @click="draftAvatar = ''"
               >
-                使用文字头像
-              </button>
+                <el-icon class="mr-1"><User /></el-icon>使用文字头像
+              </el-button>
               <input
                 ref="fileInput"
                 type="file"
@@ -118,63 +131,39 @@
               </p>
             </div>
 
-            <div class="space-y-2">
-              <label
-                class="flex items-center gap-3 p-2.5 rounded-xl border cursor-pointer transition"
-                :class="
-                  draftInterface === 'auto'
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-slate-200 hover:bg-slate-50'
-                "
-              >
-                <input
-                  type="radio"
-                  name="iface"
-                  :value="'auto'"
-                  v-model="draftInterface"
-                  class="w-4 h-4"
-                />
-                <div class="min-w-0">
-                  <div class="font-medium text-slate-800 text-[13px]">
-                    自动（全部网卡）
+            <el-radio-group v-model="draftInterface" class="w-full block">
+              <div class="space-y-2">
+                <el-radio value="auto" class="card-radio">
+                  <div class="min-w-0">
+                    <div class="font-medium text-slate-800 text-[13px]">
+                      自动（全部网卡）
+                    </div>
+                    <div class="text-[12px] text-slate-400">
+                      在所有网卡上广播与监听
+                    </div>
                   </div>
-                  <div class="text-[12px] text-slate-400">
-                    在所有网卡上广播与监听
-                  </div>
-                </div>
-              </label>
-
-              <label
-                v-for="it in interfaces"
-                :key="it.address"
-                class="flex items-center gap-3 p-2.5 rounded-xl border cursor-pointer transition"
-                :class="
-                  draftInterface === it.address
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-slate-200 hover:bg-slate-50'
-                "
-              >
-                <input
-                  type="radio"
-                  name="iface"
+                </el-radio>
+                <el-radio
+                  v-for="it in interfaces"
+                  :key="it.address"
                   :value="it.address"
-                  v-model="draftInterface"
-                  class="w-4 h-4"
-                />
-                <div class="min-w-0">
-                  <div class="font-medium text-slate-800 text-[13px]">
-                    {{ it.name }}
+                  class="card-radio"
+                >
+                  <div class="min-w-0">
+                    <div class="font-medium text-slate-800 text-[13px]">
+                      {{ it.name }}
+                    </div>
+                    <div class="text-[12px] text-slate-400">
+                      {{ it.address }} · {{ it.netmask }}
+                    </div>
                   </div>
-                  <div class="text-[12px] text-slate-400">
-                    {{ it.address }} · {{ it.netmask }}
-                  </div>
-                </div>
-              </label>
+                </el-radio>
+              </div>
+            </el-radio-group>
 
-              <p v-if="!interfaces.length" class="text-slate-400 text-[13px]">
-                未检测到可用网卡。
-              </p>
-            </div>
+            <p v-if="!interfaces.length" class="text-slate-400 text-[13px]">
+              未检测到可用网卡。
+            </p>
           </div>
 
           <!-- ============ 屏幕广播 ============ -->
@@ -189,51 +178,37 @@
             </div>
 
             <div class="text-[13px] font-semibold text-slate-500 mb-2">画质</div>
-            <div class="space-y-2">
-              <label
-                v-for="q in qualities"
-                :key="q.key"
-                class="flex items-center gap-3 p-2.5 rounded-xl border cursor-pointer transition"
-                :class="
-                  draftQuality === q.key
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-slate-200 hover:bg-slate-50'
-                "
-              >
-                <input
-                  type="radio"
-                  name="quality"
+            <el-radio-group v-model="draftQuality" class="w-full block">
+              <div class="space-y-2">
+                <el-radio
+                  v-for="q in qualities"
+                  :key="q.key"
                   :value="q.key"
-                  v-model="draftQuality"
-                  class="w-4 h-4"
-                />
-                <div class="min-w-0">
-                  <div class="font-medium text-slate-800 text-[13px]">
-                    {{ q.label }}
+                  class="card-radio"
+                >
+                  <div class="min-w-0">
+                    <div class="font-medium text-slate-800 text-[13px]">
+                      {{ q.label }}
+                    </div>
+                    <div class="text-[12px] text-slate-400">{{ q.desc }}</div>
                   </div>
-                  <div class="text-[12px] text-slate-400">{{ q.desc }}</div>
-                </div>
-              </label>
-            </div>
+                </el-radio>
+              </div>
+            </el-radio-group>
 
             <div class="text-[13px] font-semibold text-slate-500 mt-5 mb-2">
               帧率
             </div>
-            <div class="flex gap-2">
-              <button
+            <el-radio-group v-model="draftFps">
+              <el-radio-button
                 v-for="f in fpsOptions"
                 :key="f"
-                class="flex-1 py-2 rounded-xl border transition text-[13px]"
-                :class="
-                  draftFps === f
-                    ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
-                    : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                "
-                @click="draftFps = f"
+                :value="f"
+                size="small"
               >
                 {{ f }} 帧/秒
-              </button>
-            </div>
+              </el-radio-button>
+            </el-radio-group>
             <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
               演示动态视频可选 60 帧；看文档/课件 30 帧即可，网络差时可选 15 帧。
               正在广播时修改会即时生效，已观看的同事不会断开。
@@ -260,17 +235,7 @@
                   收到文字、表情或文件等新消息时播放提示音
                 </div>
               </div>
-              <button
-                type="button"
-                class="relative w-11 h-6 rounded-full transition-colors flex-none"
-                :class="draftPlaySound ? 'bg-blue-600' : 'bg-slate-300'"
-                @click="draftPlaySound = !draftPlaySound"
-              >
-                <span
-                  class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform"
-                  :class="draftPlaySound ? 'translate-x-5' : 'translate-x-0'"
-                ></span>
-              </button>
+              <el-switch v-model="draftPlaySound" />
             </div>
           </div>
         </div>
@@ -280,8 +245,8 @@
       <div
         class="px-5 py-3 border-t border-slate-200 flex justify-end gap-2 flex-none"
       >
-        <button @click="$emit('close')">取消</button>
-        <button class="primary" @click="save">保存</button>
+        <el-button @click="$emit('close')">取消</el-button>
+        <el-button type="primary" @click="save">保存</el-button>
       </div>
     </div>
   </div>
@@ -297,13 +262,7 @@ import Avatar from './Avatar.vue'
 const emit = defineEmits(['close'])
 const store = useStore()
 
-// 左侧类别导航
-const tabs = [
-  { key: 'profile', label: '个人资料' },
-  { key: 'network', label: '通信网卡' },
-  { key: 'broadcast', label: '屏幕广播' },
-  { key: 'notify', label: '通知' }
-]
+// 左侧类别导航（key 与右侧面板一一对应）
 const activeTab = ref('profile')
 
 const builtins = BUILTIN_AVATARS
@@ -374,3 +333,32 @@ async function save() {
   emit('close')
 }
 </script>
+
+<style scoped>
+/* 把 el-radio 改造成「卡片式」选项：整体可点、两行文本、选中高亮 */
+.card-radio {
+  display: flex;
+  align-items: flex-start;
+  height: auto;
+  width: 100%;
+  margin-right: 0;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0; /* slate-200 */
+  border-radius: 12px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.card-radio:hover {
+  background-color: #f8fafc; /* slate-50 */
+}
+.card-radio.is-checked {
+  border-color: #2563eb; /* 主色 blue-600 */
+  background-color: #eff6ff; /* blue-50 */
+}
+:deep(.card-radio .el-radio__input) {
+  margin-top: 2px;
+}
+:deep(.card-radio .el-radio__label) {
+  flex: 1;
+  min-width: 0;
+}
+</style>
