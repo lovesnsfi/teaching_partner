@@ -42,6 +42,7 @@
   button.primary:hover {
     background-color: #1d4ed8; /* blue-700 */
     border-color: #1d4ed8;
+    color: #ffffff; /* 保持白字，避免被 button:hover 的蓝字覆盖 */
   }
   button.danger {
     background-color: #e11d48; /* rose-600 */
@@ -51,6 +52,7 @@
   button.danger:hover {
     background-color: #be123c; /* rose-700 */
     border-color: #be123c;
+    color: #ffffff; /* 保持白字，避免被 button:hover 的蓝字覆盖 */
   }
   button:disabled {
     opacity: 0.5;

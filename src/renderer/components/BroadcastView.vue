@@ -6,8 +6,8 @@
       屏幕广播
     </div>
     <div class="flex-1 overflow-auto p-4">
-      <!-- 学生端 -->
-      <div v-if="store.broadcast.role !== 'teacher'">
+      <!-- 学生端：已加入某位老师的广播 -->
+      <div v-if="store.broadcast.role === 'student'">
         <p class="text-slate-500 text-[13px] leading-relaxed">
           以<strong class="text-slate-700">学生</strong>身份加入老师的广播。
         </p>
@@ -30,7 +30,7 @@
           </div>
         </div>
         <p v-else class="text-slate-400 text-[13px] leading-relaxed">
-          暂无老师开播。等待邀请，或让老师点击「开始屏幕广播」。
+          暂无老师开播。等待邀请，或点击下方「开始广播」自己开播。
         </p>
 
         <div
@@ -47,40 +47,64 @@
           >
         </div>
 
-        <div class="flex gap-2 mt-3" v-if="store.broadcast.role === 'student'">
+        <div class="flex gap-2 mt-3">
           <button class="danger" @click="leave">离开广播</button>
         </div>
       </div>
 
-      <!-- 老师端 -->
+      <!-- 老师端 / 未开播：提供开播入口 -->
       <div v-else>
         <p class="text-slate-500 text-[13px] leading-relaxed">
           以<strong class="text-slate-700">老师</strong>身份广播你的屏幕。
         </p>
 
-        <div class="flex gap-2 mt-3">
-          <select v-model="selectedSource" class="flex-1">
+        <div class="flex gap-2 mt-3 items-center">
+          <select v-model="selectedSource" class="flex-1 min-w-0" :disabled="store.broadcast.teacherActive">
             <option v-for="s in store.sources" :key="s.id" :value="s.id">
               {{ s.name }}
             </option>
           </select>
-        </div>
-
-        <div class="flex gap-2 mt-3">
           <button
-            class="primary"
+            class="primary flex-none whitespace-nowrap"
             @click="start"
             :disabled="busy || !selectedSource"
+            v-if="!store.broadcast.teacherActive"
           >
-            开始屏幕广播
+            开始广播
           </button>
           <button
-            class="danger"
+            class="danger flex-none whitespace-nowrap"
             @click="stop"
             v-if="store.broadcast.teacherActive"
           >
-            停止
+            停止广播
           </button>
+        </div>
+
+        <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
+          当前 {{ qualityLabel }} · {{ store.broadcastFps }} 帧/秒，卡顿或延迟高时可在「设置」中调低。
+        </p>
+
+        <!-- 未开播时也可加入其它老师正在进行的广播 -->
+        <div
+          v-if="!store.broadcast.teacherActive && store.broadcast.invitingTeachers.length"
+          class="mt-4"
+        >
+          <div class="font-medium text-[13px] text-slate-700 mb-2">
+            其它老师正在广播（可加入）：
+          </div>
+          <div
+            v-for="t in store.broadcast.invitingTeachers"
+            :key="t.id"
+            class="flex items-center gap-2.5 p-2.5 border border-slate-200 rounded-xl mb-2"
+          >
+            <span class="w-2 h-2 rounded-full bg-amber-600 flex-none"></span>
+            <div class="min-w-0">
+              <div class="font-medium text-slate-800">{{ t.name }}</div>
+              <div class="text-[12px] text-slate-400">{{ t.ip }}</div>
+            </div>
+            <button class="primary ml-auto" @click="join(t)">进入</button>
+          </div>
         </div>
 
         <p
@@ -114,14 +138,21 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, computed } from 'vue'
 import { useStore } from '../store/index.js'
+import { getQualityProfile } from '../webrtc.js'
 
 const store = useStore()
 const teacherVideo = ref(null)
 const studentVideo = ref(null)
 const selectedSource = ref('')
 const busy = ref(false)
+
+// 当前画质档位说明（含码率上限），用于在面板上直观展示
+const qualityLabel = computed(() => {
+  const p = getQualityProfile(store.broadcastQuality)
+  return `${p.label}（${Math.round(p.maxBitrate / 1000)} kbps 上限）`
+})
 
 onMounted(async () => {
   try {
@@ -143,7 +174,16 @@ async function start() {
   try {
     await store.startBroadcast(selectedSource.value)
   } catch (e) {
-    alert('开始广播失败：' + (e && e.message ? e.message : e))
+    const raw = e && e.message ? e.message : String(e)
+    alert(
+      '开始广播失败：' +
+        raw +
+        '\n\n采集单个窗口时请确保：\n' +
+        '· 目标窗口未被最小化，且保持可见；\n' +
+        '· 目标窗口没有被关闭；\n' +
+        '· 若目标是管理员权限的程序，请调整两端运行权限一致。\n' +
+        '若仍失败，可改选「整个屏幕」重试。'
+    )
   } finally {
     busy.value = false
   }

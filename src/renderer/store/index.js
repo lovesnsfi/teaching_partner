@@ -1,5 +1,10 @@
 import { defineStore } from 'pinia'
-import { TeacherBroadcaster, StudentReceiver, captureScreen } from '../webrtc.js'
+import {
+  TeacherBroadcaster,
+  StudentReceiver,
+  captureScreen,
+  getQualityProfile
+} from '../webrtc.js'
 
 // WebRTC 实例放模块级，避免被 Vue 响应式代理导致异常
 let broadcaster = null
@@ -32,9 +37,12 @@ export const useStore = defineStore('app', {
         teacherActive: false,
         teacherInfo: null,
         invitingTeachers: [],
-        studentCount: 0
+        studentCount: 0,
+        sourceId: null // 当前正在采集的源，广播中切画质/帧率需要复用它
       },
       sources: [],
+      broadcastQuality: 'hd', // 屏幕广播画质：sd 标清 | hd 高清 | origin 原画
+      broadcastFps: 30, // 屏幕广播帧率：15 | 30 | 60
       status: 'init'
     }
   },
@@ -82,7 +90,9 @@ export const useStore = defineStore('app', {
           playSound: this.playSound,
           avatar: this.self.avatar,
           name: this.self.name,
-          selectedInterface: this.selectedInterface
+          selectedInterface: this.selectedInterface,
+          broadcastQuality: this.broadcastQuality,
+          broadcastFps: this.broadcastFps
         })
       } catch {
         /* ignore */
@@ -157,6 +167,13 @@ export const useStore = defineStore('app', {
       this.self = await window.api.getSelf()
       // 本地 UI 状态
       if (typeof s.playSound === 'boolean') this.playSound = s.playSound
+      // 广播画质 / 帧率（校验合法性，防止旧数据或非预期值）
+      if (['sd', 'hd', 'origin'].includes(s.broadcastQuality)) {
+        this.broadcastQuality = s.broadcastQuality
+      }
+      if ([15, 30, 60].includes(Number(s.broadcastFps))) {
+        this.broadcastFps = Number(s.broadcastFps)
+      }
       this.selectedInterface = s.selectedInterface || 'auto'
       this.groups = dbData.groups || []
       this.messages = dbData.messages || {}
@@ -483,18 +500,61 @@ export const useStore = defineStore('app', {
       }
       return receiver
     },
+    // 监听采集轨道结束：目标窗口被关闭 / 权限失效时 WGC 会结束该轨道，
+    // 这里兜底自动停播，避免残留 capture session 反复抛 ProcessFrame failed。
+    _watchStreamEnd(stream) {
+      stream.getVideoTracks().forEach((t) => {
+        t.addEventListener('ended', () => {
+          if (this.broadcast.localStream === stream) this.stopBroadcast()
+        })
+      })
+    },
     startBroadcast(sourceId) {
       if (!sourceId) return
-      return captureScreen(sourceId).then((stream) => {
+      const profile = getQualityProfile(this.broadcastQuality)
+      return captureScreen(sourceId, {
+        quality: this.broadcastQuality,
+        frameRate: this.broadcastFps
+      }).then((stream) => {
+        this._watchStreamEnd(stream)
         this.broadcast.role = 'teacher'
+        this.broadcast.sourceId = sourceId
         this.broadcast.localStream = stream
         this.broadcast.teacherActive = true
-        this.getBroadcaster().start(stream)
+        this.getBroadcaster().start(stream, profile.maxBitrate)
         for (const d of this.devices) {
           if (d.id !== this.self.id)
             window.api.sendSignal(d.ip, { kind: 'invite' })
         }
       })
+    },
+    // 调整广播画质 / 帧率。
+    // · 未在广播：仅保存设置，下次开播生效。
+    // · 正在广播：码率即时生效；分辨率/帧率变化则重新采集，再用 replaceTrack 热切换，
+    //   与学生已建立的连接不断开、无需重新协商，观看者无感知。
+    async setBroadcastProfile({ quality, fps } = {}) {
+      const qChanged = quality && quality !== this.broadcastQuality
+      const fChanged = fps && Number(fps) !== this.broadcastFps
+      if (!qChanged && !fChanged) return
+      if (qChanged) this.broadcastQuality = quality
+      if (fChanged) this.broadcastFps = Number(fps)
+      this._saveSettings()
+      if (!this.broadcast.teacherActive) return
+
+      // 码率可随时调整
+      this.getBroadcaster().applyBitrate(getQualityProfile(this.broadcastQuality).maxBitrate)
+      if (!this.broadcast.sourceId) return
+      try {
+        const stream = await captureScreen(this.broadcast.sourceId, {
+          quality: this.broadcastQuality,
+          frameRate: this.broadcastFps
+        })
+        const merged = await this.getBroadcaster().replaceVideo(stream)
+        this._watchStreamEnd(merged)
+        this.broadcast.localStream = merged
+      } catch (e) {
+        throw new Error('切换画质失败：' + ((e && e.message) || e))
+      }
     },
     stopBroadcast() {
       if (broadcaster) broadcaster.stop()
@@ -508,6 +568,7 @@ export const useStore = defineStore('app', {
       this.broadcast.localStream = null
       this.broadcast.teacherActive = false
       this.broadcast.studentCount = 0
+      this.broadcast.sourceId = null
       this.broadcast.role = null
       broadcaster = null
     },

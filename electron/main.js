@@ -43,6 +43,12 @@ let persist = null // 本地持久化后端（SQLite 或 JSON 文件）
 // 允许 Electron 在无用户手势时自动播放音频（收到新消息的提示音）
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
+// 窗口捕获稳定性：Chromium 会把被遮挡/不可见的窗口判定为"无需绘制"，
+// 导致 Windows Graphics Capture 单窗口取帧失败
+// (wgc_capture_session: ProcessFrame failed, using existing frame: 0x80004005)。
+// 关闭该遮挡优化，使被遮挡的窗口仍可正常采集。
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
+
 // 文件接收状态：fileId -> { stream, tmp, received, total, convId, groupId, fromName, name, size, mime }
 const fileRecv = new Map()
 
