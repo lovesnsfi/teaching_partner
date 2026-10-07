@@ -34,8 +34,47 @@ jobs:
         run: npm run build
 
       - name: Build & publish (electron-builder -> GitHub Releases)
-        run: npx electron-builder --win --x64 -p always
+        shell: pwsh
+        run: |
+          npx electron-builder --win --x64 -p always 2>&1 | Tee-Object -FilePath builder.log
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::electron-builder exited with code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
         env:
           # GitHub 自动提供的令牌，拥有当前仓库的 contents:write 权限，
           # electron-builder 用它创建 Release 并上传安装包 / latest.yml / blockmap。
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 解除 electron-builder「已发布超过 2 小时的 Release 不再补传产物」的保护，
+          # 便于重跑时覆盖旧产物。
+          EP_GH_IGNORE_TIME: 'true'
+          # 打开详细日志，便于排查发布失败原因
+          DEBUG: electron-builder,electron-publish
+
+      # 无论成败都输出诊断信息到运行摘要页，方便直接查看失败原因
+      - name: Diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $s = $env:GITHUB_STEP_SUMMARY
+          "### electron-builder 输出（最后 100 行）" | Out-File -Append $s
+          "" | Out-File -Append $s
+          if (Test-Path builder.log) {
+            Get-Content builder.log -Tail 100 | Out-String | Out-File -Append $s
+          } else {
+            "未生成 builder.log（构建步骤可能未启动即失败）。" | Out-File -Append $s
+          }
+          "" | Out-File -Append $s
+          "### dist/ 产物列表" | Out-File -Append $s
+          "" | Out-File -Append $s
+          $items = Get-ChildItem dist -ErrorAction SilentlyContinue
+          if ($items) {
+            ($items | Select-Object Name, Length | Format-Table -AutoSize | Out-String) | Out-File -Append $s
+          } else {
+            "dist/ 为空或不存在" | Out-File -Append $s
+          }
+          "" | Out-File -Append $s
+          "### 版本与 publish 配置" | Out-File -Append $s
+          "" | Out-File -Append $s
+          "version: $((Get-Content package.json | ConvertFrom-Json).version)"
+          "publish: $((Get-Content package.json | ConvertFrom-Json).build.publish | ConvertTo-Json -Compress)"
