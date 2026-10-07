@@ -44,6 +44,10 @@
             <el-icon><Bell /></el-icon>
             <span>通知</span>
           </el-menu-item>
+          <el-menu-item index="about">
+            <el-icon><InfoFilled /></el-icon>
+            <span>关于</span>
+          </el-menu-item>
         </el-menu>
 
         <!-- 右侧设置项（固定高度内滚动，min-h-0 防止被内容撑开） -->
@@ -216,7 +220,7 @@
           </div>
 
           <!-- ============ 通知 ============ -->
-          <div v-else>
+          <div v-else-if="activeTab === 'notify'">
             <div class="mb-4">
               <div class="text-[15px] font-semibold text-slate-800">通知</div>
               <p class="text-[12px] text-slate-400 mt-0.5 leading-relaxed">
@@ -237,6 +241,36 @@
               </div>
               <el-switch v-model="draftPlaySound" />
             </div>
+          </div>
+
+          <!-- ============ 关于 ============ -->
+          <div v-else-if="activeTab === 'about'">
+            <div class="mb-4">
+              <div class="text-[15px] font-semibold text-slate-800">关于</div>
+              <p class="text-[12px] text-slate-400 mt-0.5 leading-relaxed">
+                版本信息与自动更新。程序启动后会自动检查更新，也可在此手动检查。
+              </p>
+            </div>
+
+            <div
+              class="flex items-center justify-between p-3 rounded-xl border border-slate-200"
+            >
+              <div class="pr-4">
+                <div class="font-medium text-slate-800 text-[13px]">
+                  当前版本
+                </div>
+                <div class="text-[12px] text-slate-400">
+                  {{ appVersion || '加载中…' }}
+                </div>
+              </div>
+              <el-button size="small" :loading="checking" @click="checkUpdate">
+                <el-icon class="mr-1"><Refresh /></el-icon>检查更新
+              </el-button>
+            </div>
+
+            <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
+              新版本通过 GitHub 下载安装，更新过程不会丢失本地聊天记录与联系人。
+            </p>
           </div>
         </div>
       </div>
@@ -275,6 +309,8 @@ const qualities = Object.values(BROADCAST_QUALITY)
 const fpsOptions = BROADCAST_FPS
 const interfaces = ref([])
 const fileInput = ref(null)
+const appVersion = ref('')
+const checking = ref(false)
 
 onMounted(async () => {
   try {
@@ -284,7 +320,26 @@ onMounted(async () => {
   } catch {
     /* ignore */
   }
+  try {
+    appVersion.value = (await window.api.getAppVersion()) || ''
+  } catch {
+    /* ignore */
+  }
 })
+
+async function checkUpdate() {
+  if (!window.api || !window.api.checkForUpdates) return
+  checking.value = true
+  try {
+    await window.api.checkForUpdates()
+  } catch {
+    /* ignore */
+  } finally {
+    checking.value = false
+    // 关闭设置，露出 App.vue 中的全局更新提示弹窗
+    emit('close')
+  }
+}
 
 function pickLocal() {
   if (fileInput.value) fileInput.value.click()

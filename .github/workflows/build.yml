@@ -1,0 +1,41 @@
+name: Build Windows & Release
+
+# 触发方式：
+#   1) 推送以 v 开头的 tag，例如 git tag v0.2.0 && git push --tags
+#   2) 在 GitHub 仓库 Actions 页面手动触发（Run workflow）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 发布到 GitHub Releases 必须拥有仓库写权限
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile (electron-vite)
+        run: npm run build
+
+      - name: Build & publish (electron-builder -> GitHub Releases)
+        run: npx electron-builder --win --x64 -p always
+        env:
+          # GitHub 自动提供的令牌，拥有当前仓库的 contents:write 权限，
+          # electron-builder 用它创建 Release 并上传安装包 / latest.yml / blockmap。
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

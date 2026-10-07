@@ -22,6 +22,7 @@ import {
 import { Signaling } from './signaling.js'
 import { getAppIcon } from './icon.js'
 import { createPersistence } from './persist.js'
+import { setupAutoUpdater } from './updater.js'
 
 // CJS 环境下 __dirname 为内置全局，无需自行定义
 const DIST = join(__dirname, '../renderer')
@@ -275,6 +276,9 @@ app.whenReady().then(async () => {
   // 初始化本地持久化（SQLite 优先，未安装则 JSON 文件降级）
   persist = await createPersistence(app.getPath('userData'))
 
+  // 自动更新：传入窗口 getter（窗口可由托盘恢复重建，故用函数取值）
+  setupAutoUpdater(() => win)
+
   createWindow()
 
   // 系统托盘：最小化后驻留右下角，仅右键菜单「退出」真正退出
@@ -325,6 +329,9 @@ app.whenReady().then(async () => {
 
   // 3) renderer -> main IPC 桥接
   ipcMain.handle('self:info', () => selfInfo())
+
+  // 当前应用版本号（设置「关于」页展示用），取自 package.json 的 version
+  ipcMain.handle('getAppVersion', () => app.getVersion())
 
   ipcMain.handle('self:setName', (_, name) => {
     if (typeof name === 'string' && name.trim()) {

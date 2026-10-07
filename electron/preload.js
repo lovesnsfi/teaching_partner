@@ -38,6 +38,11 @@ const api = {
   windowClose: () => ipcRenderer.send('window:close'),
   // 订阅类
   onDevices: (cb) => ipcRenderer.on('lan:devices', (_e, list) => cb(list)),
+  // 自动更新：获取版本、手动检查、安装、接收更新事件
+  getAppVersion: () => ipcRenderer.invoke('getAppVersion'),
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  quitAndInstall: () => ipcRenderer.invoke('updater:quit-install'),
+  onUpdateEvent: (cb) => ipcRenderer.on('updater:event', (_e, payload) => cb(payload)),
   onChat: (cb) => ipcRenderer.on('lan:chat', (_e, msg) => cb(msg)),
   onSignal: (cb) => ipcRenderer.on('lan:signal', (_e, msg) => cb(msg)),
   onGroup: (cb) => ipcRenderer.on('lan:group', (_e, msg) => cb(msg)),

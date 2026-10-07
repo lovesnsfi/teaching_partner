@@ -16,7 +16,7 @@ export default defineConfig({
       },
       rollupOptions: {
         // 原生模块与含 .wasm 的包都不能被打包，必须留给运行时从 node_modules 加载
-        external: ['ws', 'better-sqlite3', 'node-sqlite3-wasm']
+        external: ['ws', 'better-sqlite3', 'node-sqlite3-wasm', 'electron-updater']
       }
     }
   },

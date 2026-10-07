@@ -52,25 +52,57 @@
     </main>
 
     <SettingsModal v-if="showSettings" @close="showSettings = false" />
+
+    <!-- 全局更新提示弹窗（自动检查 / 手动检查的结果都在此展示） -->
+    <UpdateDialog
+      v-model:visible="update.visible"
+      :channel="update.channel"
+      :data="update.data"
+      @install="installUpdate"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useStore } from './store/index.js'
 import { loadAvatars } from './avatars.js'
 import DeviceList from './components/DeviceList.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import BroadcastView from './components/BroadcastView.vue'
 import SettingsModal from './components/SettingsModal.vue'
+import UpdateDialog from './components/UpdateDialog.vue'
 import Avatar from './components/Avatar.vue'
 
 const store = useStore()
 const showSettings = ref(false)
 
+// 自动更新弹窗状态：由主进程经 preload 推送的 updater:event 驱动
+const update = reactive({ visible: false, channel: '', data: {} })
+const VISIBLE_CHANNELS = [
+  'update-available',
+  'download-progress',
+  'update-downloaded',
+  'update-not-available',
+  'error',
+  'dev-skip'
+]
+function onUpdateEvent(payload) {
+  if (!payload) return
+  update.channel = payload.channel
+  update.data = payload.data || {}
+  if (VISIBLE_CHANNELS.includes(payload.channel)) update.visible = true
+}
+function installUpdate() {
+  if (window.api) window.api.quitAndInstall()
+}
+
 onMounted(() => {
   store.init()
   loadAvatars()
+  if (window.api && window.api.onUpdateEvent) {
+    window.api.onUpdateEvent(onUpdateEvent)
+  }
 })
 
 function onMinimize() {

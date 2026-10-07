@@ -98,7 +98,8 @@
 │  ├─ signaling.js           WebSocket 信令服务端与消息收发
 │  ├─ persist.js             本地持久化（SQLite 优先，JSON 兜底）
 │  ├─ preload.js             contextBridge 暴露受控 API
-│  └─ icon.js                运行时生成托盘图标（免二进制资源）
+│  ├─ updater.js             自动更新（electron-updater 封装与事件转发）
+│  └─ icon.js                托盘/窗口图标（读取 app.ico）
 ├─ src/
 │  └─ renderer/
 │  │  ├─ main.js             Vue 应用入口（注册 Element Plus 与图标）
@@ -144,7 +145,19 @@ npm run preview      # 本地预览构建产物
 ```bash
 npm run pack         # 输出到 dist/，Windows 下生成 NSIS 安装包
 ```
-打包配置见 `package.json` 的 `build` 字段：`extraResources` 会把 `assets`（提示音）一并打进安装包，`asarUnpack` 确保 SQLite 的 wasm 文件能被正常读取。
+打包配置见 `package.json` 的 `build` 字段：`extraResources` 会把 `assets`（提示音、头像）一并打进安装包，`asarUnpack` 确保 SQLite 的 wasm 文件能被正常读取。
+
+### 自动更新（GitHub 发布）
+
+项目已接入 `electron-updater`，更新源为 GitHub Releases（仓库 `lovesnsfi/teaching_partner`）。
+
+- **客户端**：启动约 10 秒后自动检查更新；设置 → 关于 可手动「检查更新」。发现新版本后自动下载，下载完成弹出「立即重启」提示，重启即完成升级。更新过程不会丢失本地聊天记录与联系人。
+- **发版流程**：
+  1. 本地改完代码后，递增 `package.json` 的 `version`（如 `0.1.0` → `0.2.0`）。
+  2. 打 tag 并推送：`git tag v0.2.0 && git push --tags`。
+  3. GitHub Actions（`.github/workflows/build.yml`）在 Windows runner 上自动构建 NSIS 安装包，并发布到仓库 Releases（含 `latest.yml` 与 `.blockmap` 增量文件），客户端据此完成自动更新。
+- **本地打包仍可用**：`npm run pack`（Windows 需以管理员身份运行终端，否则 `winCodeSign` 解压符号链接会失败）。本地打包不会发布到 GitHub，仅生成 `dist/` 安装包供手动分发。
+- **国内部署提示**：GitHub Releases 在国内下载偏慢时，可改用对象存储（OSS/COS/七牛）做 `generic` 更新源，客户端只需把 `build.publish` 的 `provider` 改为 `generic` 并更新 URL，其余代码不变。
 
 ### 防火墙
 首次运行请放行以下端口（或允许该应用通过防火墙）：

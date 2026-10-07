@@ -4,6 +4,10 @@
   "private": true,
   "description": "局域网沟通与屏幕广播软件（Electron + Vue3，方案A WebRTC Mesh，无中心服务器）",
   "main": "out/main/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lovesnsfi/teaching_partner.git"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -14,6 +18,7 @@
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
     "element-plus": "^2.14.7",
+    "electron-updater": "^6.3.4",
     "node-sqlite3-wasm": "^0.8.60",
     "pinia": "^2.1.7",
     "vue": "^3.4.21",
@@ -50,6 +55,13 @@
     ],
     "win": {
       "target": "nsis"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lovesnsfi",
+        "repo": "teaching_partner"
+      }
+    ]
   }
 }
