@@ -24,6 +24,7 @@
         v-for="c in filteredContacts"
         :key="c.id"
         @click="store.setActiveChat(c.id)"
+        @contextmenu.prevent="openMenu(c, $event)"
         class="flex items-center gap-2.5 p-2.5 border rounded-xl cursor-pointer transition-colors"
         :class="
           c.id === store.activeChatId
@@ -70,6 +71,21 @@
         正在扫描局域网…<br />确保同网段，并放行 UDP 41234（发现）/ 41235（信令）。<br />
         上线过的小伙伴会自动出现在这里。
       </p>
+
+      <!-- 右键离线联系人弹出的删除菜单 -->
+      <div
+        v-if="menu.visible"
+        class="fixed z-50 bg-white border border-slate-200 rounded-lg shadow-lg py-1 text-[13px] text-slate-700 min-w-[120px]"
+        :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
+        @click.stop
+      >
+        <button
+          class="block w-full text-left px-3 py-1.5 hover:bg-rose-50 hover:text-rose-600"
+          @click="deleteContact"
+        >
+          删除联系人
+        </button>
+      </div>
 
       <div
         class="flex items-center gap-2 mt-4 mb-2 text-[12px] text-slate-400 pt-2 border-t border-slate-100"
@@ -124,13 +140,47 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useStore } from '../store/index.js'
 import GroupModal from './GroupModal.vue'
 import Avatar from './Avatar.vue'
 
 const store = useStore()
 const showModal = ref(false)
+
+// 右键菜单状态（仅离线联系人可触发，在线联系人忽略）
+const menu = reactive({ visible: false, x: 0, y: 0, id: null })
+
+function openMenu(c, e) {
+  if (c.online) return // 在线联系人不可删除
+  menu.id = c.id
+  menu.x = e.clientX
+  menu.y = e.clientY
+  menu.visible = true
+}
+function closeMenu() {
+  menu.visible = false
+  menu.id = null
+}
+function deleteContact() {
+  if (menu.id) store.deleteContact(menu.id)
+  closeMenu()
+}
+// 点击别处或右键别处时关闭菜单
+function onDocClick() {
+  if (menu.visible) closeMenu()
+}
+function onDocContextMenu() {
+  if (menu.visible) closeMenu()
+}
+onMounted(() => {
+  document.addEventListener('click', onDocClick)
+  document.addEventListener('contextmenu', onDocContextMenu)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  document.removeEventListener('contextmenu', onDocContextMenu)
+})
 
 // 联系人搜索：按昵称或 IP 地址过滤（不区分大小写、子串匹配）
 const search = ref('')

@@ -6,53 +6,66 @@
       屏幕广播
     </div>
     <div class="flex-1 overflow-auto p-4">
-      <!-- 学生端：已加入某位老师的广播 -->
+      <!-- 学生端：已加入某位老师的广播（画面在独立窗口中放大播放） -->
       <div v-if="store.broadcast.role === 'student'">
         <p class="text-slate-500 text-[13px] leading-relaxed">
-          以<strong class="text-slate-700">学生</strong>身份加入老师的广播。
+          以<strong class="text-slate-700">学生</strong>身份加入老师的广播，
+          画面会在一个<strong class="text-slate-700">独立窗口</strong>中播放，可自由缩放 / 全屏。
         </p>
 
-        <div v-if="store.broadcast.invitingTeachers.length">
-          <div class="font-medium text-[13px] text-slate-700 mb-2">
-            老师正在广播：
-          </div>
-          <div
-            v-for="t in store.broadcast.invitingTeachers"
-            :key="t.id"
-            class="flex items-center gap-2.5 p-2.5 border border-slate-200 rounded-xl mb-2"
-          >
-            <span class="w-2 h-2 rounded-full bg-amber-600 flex-none"></span>
+        <!-- 已加入：显示当前观看的老师 -->
+        <div
+          v-if="store.broadcast.teacherInfo"
+          class="mt-3 p-3 border border-slate-200 rounded-xl bg-slate-50"
+        >
+          <div class="flex items-center gap-2.5">
+            <span class="w-2 h-2 rounded-full bg-emerald-500 flex-none"></span>
             <div class="min-w-0">
-              <div class="font-medium text-slate-800">{{ t.name }}</div>
-              <div class="text-[12px] text-slate-400">{{ t.ip }}</div>
+              <div class="font-medium text-slate-800 truncate">
+                {{ store.broadcast.teacherInfo.name }}
+              </div>
+              <div class="text-[12px] text-slate-400">
+                {{ store.broadcast.teacherInfo.ip }}
+              </div>
             </div>
-            <el-button type="primary" class="ml-auto" @click="join(t)">
-              <el-icon class="mr-1"><Right /></el-icon>进入
+          </div>
+          <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
+            画面已在独立窗口打开；若不小心关掉了，可点下方「重新打开观看窗口」。
+          </p>
+          <div class="flex gap-2 mt-3">
+            <el-button type="primary" @click="reopen">
+              <el-icon class="mr-1"><FullScreen /></el-icon>重新打开观看窗口
+            </el-button>
+            <el-button type="danger" @click="leave">
+              <el-icon class="mr-1"><SwitchButton /></el-icon>离开广播
             </el-button>
           </div>
         </div>
-        <p v-else class="text-slate-400 text-[13px] leading-relaxed">
-          暂无老师开播。等待邀请，或点击下方「开始广播」自己开播。
-        </p>
 
-        <div
-          class="bg-slate-900 rounded-2xl overflow-hidden aspect-video flex items-center justify-center text-slate-400 mt-3 relative"
-        >
-          <video
-            ref="studentVideo"
-            autoplay
-            playsinline
-            class="w-full h-full object-contain bg-black"
-          ></video>
-          <span v-if="!store.broadcast.teacherStream" class="absolute"
-            >未连接到老师</span
-          >
-        </div>
-
-        <div class="flex gap-2 mt-3">
-          <el-button type="danger" @click="leave">
-            <el-icon class="mr-1"><SwitchButton /></el-icon>离开广播
-          </el-button>
+        <!-- 未加入：列出正在广播的老师 -->
+        <div v-else>
+          <div v-if="store.broadcast.invitingTeachers.length">
+            <div class="font-medium text-[13px] text-slate-700 mb-2 mt-3">
+              老师正在广播：
+            </div>
+            <div
+              v-for="t in store.broadcast.invitingTeachers"
+              :key="t.id"
+              class="flex items-center gap-2.5 p-2.5 border border-slate-200 rounded-xl mb-2"
+            >
+              <span class="w-2 h-2 rounded-full bg-amber-600 flex-none"></span>
+              <div class="min-w-0">
+                <div class="font-medium text-slate-800">{{ t.name }}</div>
+                <div class="text-[12px] text-slate-400">{{ t.ip }}</div>
+              </div>
+              <el-button type="primary" class="ml-auto" @click="join(t)">
+                <el-icon class="mr-1"><Right /></el-icon>进入
+              </el-button>
+            </div>
+          </div>
+          <p v-else class="text-slate-400 text-[13px] leading-relaxed mt-3">
+            暂无老师开播。等待邀请，或点击下方「开始广播」自己开播。
+          </p>
         </div>
       </div>
 
@@ -161,7 +174,6 @@ import { getQualityProfile } from '../webrtc.js'
 
 const store = useStore()
 const teacherVideo = ref(null)
-const studentVideo = ref(null)
 const selectedSource = ref('')
 const busy = ref(false)
 
@@ -181,8 +193,6 @@ onMounted(async () => {
   }
   if (store.broadcast.localStream && teacherVideo.value)
     teacherVideo.value.srcObject = store.broadcast.localStream
-  if (store.broadcast.teacherStream && studentVideo.value)
-    studentVideo.value.srcObject = store.broadcast.teacherStream
 })
 
 async function start() {
@@ -214,6 +224,11 @@ function join(t) {
   store.joinBroadcast(t)
 }
 
+// 用户手动关掉观看窗口后，可从这里重新打开
+function reopen() {
+  store.reopenBroadcastWindow()
+}
+
 function leave() {
   store.leaveBroadcast()
 }
@@ -222,12 +237,6 @@ watch(
   () => store.broadcast.localStream,
   (s) => {
     if (teacherVideo.value) teacherVideo.value.srcObject = s
-  }
-)
-watch(
-  () => store.broadcast.teacherStream,
-  (s) => {
-    if (studentVideo.value) studentVideo.value.srcObject = s
   }
 )
 </script>

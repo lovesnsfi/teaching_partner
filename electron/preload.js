@@ -25,8 +25,16 @@ const api = {
     ipcRenderer.send('send:chat', { targetIp, payload }),
   sendSignal: (targetIp, payload) =>
     ipcRenderer.send('send:signal', { targetIp, payload }),
-  // 文件：主进程负责分片发送；spec = { fileId, ips, convId, groupId, file }
+  // 发送文件：主进程只发出「传输请求」，等对方确认接收后再真正分片发送
+  // spec = { fileId, ips, convId, groupId, file }
   sendFile: (spec) => ipcRenderer.send('send:file', spec),
+  // 接收方确认 / 拒绝接收（accept 传 { fileId, saveAs:true } 会先弹「另存为」）
+  acceptFile: (spec) => ipcRenderer.invoke('file:accept', spec),
+  rejectFile: (spec) => ipcRenderer.invoke('file:reject', spec),
+  // 学生端屏幕广播：独立观看窗口 打开 / 关闭 / 被关闭通知
+  openBroadcastWindow: (info) => ipcRenderer.invoke('broadcast:open', info),
+  closeBroadcastWindow: () => ipcRenderer.invoke('broadcast:close'),
+  onBroadcastClosed: (cb) => ipcRenderer.on('lan:broadcast-closed', () => cb()),
   // 选择文件，返回 { path, name, size, mime } 或 null
   pickFile: () => ipcRenderer.invoke('pick:file'),
   // 打开文件 / 在资源管理器定位
@@ -38,6 +46,8 @@ const api = {
   windowClose: () => ipcRenderer.send('window:close'),
   // 订阅类
   onDevices: (cb) => ipcRenderer.on('lan:devices', (_e, list) => cb(list)),
+  // 主动拉取当前已发现设备列表（init 时消除监听器注册时序导致的漏存）
+  getDeviceList: () => ipcRenderer.invoke('discovery:list'),
   // 自动更新：获取版本、手动检查、安装、接收更新事件
   getAppVersion: () => ipcRenderer.invoke('getAppVersion'),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
@@ -49,6 +59,8 @@ const api = {
   onFileOffer: (cb) => ipcRenderer.on('lan:file-offer', (_e, m) => cb(m)),
   onFileProgress: (cb) => ipcRenderer.on('lan:file-progress', (_e, m) => cb(m)),
   onFileDone: (cb) => ipcRenderer.on('lan:file-done', (_e, m) => cb(m)),
+  // 发送方：对方已拒绝接收该文件
+  onFileRejected: (cb) => ipcRenderer.on('lan:file-rejected', (_e, m) => cb(m)),
   onFileSendStart: (cb) =>
     ipcRenderer.on('lan:file-send-start', (_e, m) => cb(m)),
   onFileSendProgress: (cb) =>

@@ -40,6 +40,24 @@ export function getQualityProfile(key) {
   return BROADCAST_QUALITY[key] || BROADCAST_QUALITY.hd
 }
 
+// 跨进程（Electron IPC）传递时必须转成「普通对象」：
+// RTCSessionDescription / RTCIceCandidate 的字段（type/sdp/candidate…）是
+// Blink 内部的原型访问器，不是自有可枚举属性。经结构化克隆后会被丢成空对象 {}，
+// 对端 setRemoteDescription 时便报 "Failed to parse SessionDescription"（SDP 为空）。
+function plainSdp(desc) {
+  if (!desc) return null
+  return { type: desc.type, sdp: desc.sdp }
+}
+function plainCandidate(c) {
+  if (!c) return null
+  return {
+    candidate: c.candidate,
+    sdpMid: c.sdpMid,
+    sdpMLineIndex: c.sdpMLineIndex,
+    usernameFragment: c.usernameFragment
+  }
+}
+
 // 老师端广播器
 export class TeacherBroadcaster {
   constructor(sendSignal) {
@@ -60,9 +78,13 @@ export class TeacherBroadcaster {
     this.stream.getTracks().forEach((t) => pc.addTrack(t, this.stream))
     // 限制视频编码码率：这是决定带宽占用与延迟的关键
     this._applyBitrateToPc(pc)
+    const peer = { pc, pendingIce: [], remoteSet: false }
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        this.sendSignal(student.ip, { kind: 'ice', candidate: e.candidate })
+        this.sendSignal(student.ip, {
+          kind: 'ice',
+          candidate: plainCandidate(e.candidate)
+        })
       }
     }
     pc.onconnectionstatechange = () => {
@@ -70,14 +92,14 @@ export class TeacherBroadcaster {
         this.removeStudent(student.id)
       }
     }
-    this.peers.set(student.id, { pc })
+    this.peers.set(student.id, peer)
 
     pc.createOffer()
       .then((offer) => pc.setLocalDescription(offer))
       .then(() => {
         this.sendSignal(student.ip, {
           kind: 'offer',
-          sdp: pc.localDescription
+          sdp: plainSdp(pc.localDescription)
         })
       })
       .catch((err) => console.error('[broadcast] offer error', err))
@@ -144,13 +166,33 @@ export class TeacherBroadcaster {
 
   handleAnswer(fromId, sdp) {
     const peer = this.peers.get(fromId)
-    if (peer) peer.pc.setRemoteDescription(sdp).catch((e) => console.error(e))
+    if (!peer || !sdp) return
+    peer.pc
+      .setRemoteDescription(sdp)
+      .then(() => {
+        peer.remoteSet = true
+        // 远端描述就绪后，补加此前到达、被暂存的 ICE 候选
+        this._flushIce(peer)
+      })
+      .catch((e) => console.error('[broadcast] setRemote(answer) error', e))
   }
 
   handleIce(fromId, candidate) {
     const peer = this.peers.get(fromId)
-    if (peer && candidate) {
-      peer.pc.addIceCandidate(candidate).catch((e) => console.error(e))
+    if (!peer || !candidate) return
+    // setRemoteDescription 之前调用 addIceCandidate 会抛错，先暂存
+    if (!peer.remoteSet) {
+      peer.pendingIce.push(candidate)
+      return
+    }
+    peer.pc.addIceCandidate(candidate).catch((e) => console.error(e))
+  }
+
+  _flushIce(peer) {
+    if (!peer || !peer.pendingIce || !peer.pendingIce.length) return
+    const list = peer.pendingIce.splice(0)
+    for (const c of list) {
+      peer.pc.addIceCandidate(c).catch((e) => console.error(e))
     }
   }
 
@@ -190,12 +232,16 @@ export class StudentReceiver {
     this.pc = null
     this.teacherIp = null
     this.teacherId = null
+    this.pendingIce = []
+    this.remoteSet = false
   }
 
   handleOffer(fromId, fromIp, sdp) {
     this.teacherId = fromId
     this.teacherIp = fromIp
     this.pc = new RTCPeerConnection({ iceServers: [] })
+    this.remoteSet = false
+    this.pendingIce = []
     this.pc.ontrack = (e) => {
       if (e.streams && e.streams[0]) this.onStream(e.streams[0])
     }
@@ -203,25 +249,42 @@ export class StudentReceiver {
       if (e.candidate) {
         this.sendSignal(this.teacherIp, {
           kind: 'ice',
-          candidate: e.candidate
+          candidate: plainCandidate(e.candidate)
         })
       }
     }
-    this.pc.setRemoteDescription(sdp)
-      .then(() => this.pc.createAnswer())
+    this.pc
+      .setRemoteDescription(sdp)
+      .then(() => {
+        this.remoteSet = true
+        this._flushIce()
+        return this.pc.createAnswer()
+      })
       .then((answer) => this.pc.setLocalDescription(answer))
       .then(() => {
         this.sendSignal(this.teacherIp, {
           kind: 'answer',
-          sdp: this.pc.localDescription
+          sdp: plainSdp(this.pc.localDescription)
         })
       })
       .catch((err) => console.error('[receive] answer error', err))
   }
 
   handleIce(candidate) {
-    if (this.pc && candidate) {
-      this.pc.addIceCandidate(candidate).catch((e) => console.error(e))
+    if (!candidate) return
+    // 还没 setRemoteDescription，先暂存，等就绪后补加
+    if (!this.pc || !this.remoteSet) {
+      this.pendingIce.push(candidate)
+      return
+    }
+    this.pc.addIceCandidate(candidate).catch((e) => console.error(e))
+  }
+
+  _flushIce() {
+    if (!this.pc || !this.pendingIce.length) return
+    const list = this.pendingIce.splice(0)
+    for (const c of list) {
+      this.pc.addIceCandidate(c).catch((e) => console.error(e))
     }
   }
 
@@ -234,6 +297,8 @@ export class StudentReceiver {
       }
       this.pc = null
     }
+    this.pendingIce = []
+    this.remoteSet = false
   }
 }
 

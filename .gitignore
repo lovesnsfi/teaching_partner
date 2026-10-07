@@ -4,3 +4,7 @@ dist
 .vite
 *.log
 .DS_Store
+
+# 本机 npm 镜像配置（npmmirror），仅用于本地拉取加速。
+# 不应提交：GitHub Actions 在海外 runner 上构建，走国内镜像反而更慢或失败。
+.npmrc

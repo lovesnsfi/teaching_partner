@@ -130,11 +130,14 @@ function safeParse(s, fallback) {
   }
 }
 
-// 载入时统一规范化文件类消息：重启后视为已完成（不再显示"发送中/接收中"）
+// 载入时统一规范化文件类消息：重启后视为已完成（不再显示"发送中/接收中"，
+// 也不再残留「等待对方接收 / 待接收」这类已经失效的中间态）
 function normalizeFileMsg(m) {
   if (m && m.kind === 'file') {
     m.sending = false
     m.receiving = false
+    m.waiting = false
+    m.awaiting = false
   }
   return m
 }
