@@ -13,13 +13,17 @@
           画面会在一个<strong class="text-slate-700">独立窗口</strong>中播放，可自由缩放 / 全屏。
         </p>
 
-        <!-- 已加入：显示当前观看的老师 -->
+        <!-- 已加入：显示当前观看的老师（无论观看窗口是否开着都保留这张卡片） -->
         <div
           v-if="store.broadcast.teacherInfo"
-          class="mt-3 p-3 border border-slate-200 rounded-xl bg-slate-50"
+          class="mt-3 p-3 border border-slate-200 rounded-xl"
+          :class="store.broadcast.viewerOpen ? 'bg-slate-50' : 'bg-amber-50 border-amber-200'"
         >
           <div class="flex items-center gap-2.5">
-            <span class="w-2 h-2 rounded-full bg-emerald-500 flex-none"></span>
+            <span
+              class="w-2 h-2 rounded-full flex-none"
+              :class="store.broadcast.viewerOpen ? 'bg-emerald-500' : 'bg-amber-500'"
+            ></span>
             <div class="min-w-0">
               <div class="font-medium text-slate-800 truncate">
                 {{ store.broadcast.teacherInfo.name }}
@@ -29,12 +33,18 @@
               </div>
             </div>
           </div>
-          <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
-            画面已在独立窗口打开；若不小心关掉了，可点下方「重新打开观看窗口」。
+          <p class="text-[12px] mt-2 leading-relaxed" :class="store.broadcast.viewerOpen ? 'text-slate-400' : 'text-amber-700'">
+            {{
+              store.broadcast.viewerOpen
+                ? '画面已在独立窗口打开，可自由缩放 / 全屏。'
+                : '观看窗口已关闭，但你和老师的连接关系仍然保留 —— 点下方按钮可重新打开继续观看。'
+            }}
           </p>
           <div class="flex gap-2 mt-3">
             <el-button type="primary" @click="reopen">
-              <el-icon class="mr-1"><FullScreen /></el-icon>重新打开观看窗口
+              <el-icon class="mr-1"><FullScreen /></el-icon>{{
+                store.broadcast.viewerOpen ? '重新打开观看窗口' : '打开观看窗口'
+              }}
             </el-button>
             <el-button type="danger" @click="leave">
               <el-icon class="mr-1"><SwitchButton /></el-icon>离开广播
@@ -168,7 +178,8 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, computed } from 'vue'
+import { ref, watch, onMounted, computed, nextTick } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { useStore } from '../store/index.js'
 import { getQualityProfile } from '../webrtc.js'
 
@@ -195,21 +206,72 @@ onMounted(async () => {
     teacherVideo.value.srcObject = store.broadcast.localStream
 })
 
+// 屏幕采集可用性自检。
+// Chromium 在「远程桌面(RDP) / 虚拟机无 3D 加速 / 显卡驱动不支持」等环境下，
+// DXGI 桌面复制(DxgiDuplicator)会初始化失败。此时 getUserMedia 仍会成功返回流对象，
+// 但一帧画面都取不到（控制台不停刷 screen_capturer_win_directx 报错），
+// 用户只看到黑屏却毫无提示。这里用 requestVideoFrameCallback 数帧来识别这种情况。
+// 返回帧数；浏览器不支持该 API 时返回 null 表示无法判断。
+async function probeFrameFlow(video, ms = 1500) {
+  if (!video || typeof video.requestVideoFrameCallback !== 'function') return null
+  let frames = 0
+  let finished = false
+  let timer = null
+  const start = performance.now()
+  await new Promise((resolve) => {
+    const tick = () => {
+      frames++
+      if (finished) return
+      if (performance.now() - start >= ms) {
+        finished = true
+        resolve()
+        return
+      }
+      video.requestVideoFrameCallback(tick)
+    }
+    timer = setTimeout(() => {
+      finished = true
+      resolve()
+    }, ms)
+    video.requestVideoFrameCallback(tick)
+  })
+  if (timer) clearTimeout(timer)
+  return frames
+}
+
 async function start() {
   if (!selectedSource.value) return
   busy.value = true
   try {
     await store.startBroadcast(selectedSource.value)
+    // 等本地预览元素拿到流之后自检：1.5 秒内一帧都没有 = 当前环境采不到画面
+    await nextTick()
+    const frames = await probeFrameFlow(teacherVideo.value, 1500)
+    if (frames !== null && frames <= 1) {
+      store.stopBroadcast()
+      ElMessageBox.alert(
+        '已开启广播，但检测不到任何画面帧，当前环境很可能不支持屏幕采集。\n\n' +
+          '常见原因：\n' +
+          '· 本机正通过「远程桌面」被控制 —— RDP 会话没有可采集的物理桌面，' +
+          '请改为在老师本机控制台上直接运行；\n' +
+          '· 本机是虚拟机且未启用 3D 加速；\n' +
+          '· 显卡驱动过旧或不支持 DXGI 桌面复制。',
+        '采集不到画面',
+        { type: 'warning', confirmButtonText: '知道了' }
+      )
+    }
   } catch (e) {
     const raw = e && e.message ? e.message : String(e)
-    alert(
+    ElMessageBox.alert(
       '开始广播失败：' +
         raw +
         '\n\n采集单个窗口时请确保：\n' +
         '· 目标窗口未被最小化，且保持可见；\n' +
         '· 目标窗口没有被关闭；\n' +
         '· 若目标是管理员权限的程序，请调整两端运行权限一致。\n' +
-        '若仍失败，可改选「整个屏幕」重试。'
+        '若仍失败，可改选「整个屏幕」重试。',
+      '开始广播失败',
+      { type: 'error', confirmButtonText: '知道了' }
     )
   } finally {
     busy.value = false

@@ -12,6 +12,8 @@ const api = {
   // 本地持久化（SQLite / JSON 文件，由主进程选择后端）
   dbLoad: () => ipcRenderer.invoke('db:load'),
   dbSaveSettings: (obj) => ipcRenderer.invoke('db:saveSettings', obj),
+  // 删除某会话的全部消息（删除联系人时同步清理聊天记录）
+  dbDeleteMessages: (convId) => ipcRenderer.invoke('db:deleteMessages', convId),
   dbReplaceGroups: (groups) => ipcRenderer.invoke('db:replaceGroups', groups),
   dbReplaceContacts: (list) => ipcRenderer.invoke('db:replaceContacts', list),
   dbAppendMessage: (m) => ipcRenderer.invoke('db:appendMessage', m),
@@ -32,9 +34,11 @@ const api = {
   acceptFile: (spec) => ipcRenderer.invoke('file:accept', spec),
   rejectFile: (spec) => ipcRenderer.invoke('file:reject', spec),
   // 学生端屏幕广播：独立观看窗口 打开 / 关闭 / 被关闭通知
+  // close 传 reason：'closed' 学生手动关窗（保留学生身份）| 'teacher-stopped' 老师停播 | 'leave' 主动离开
   openBroadcastWindow: (info) => ipcRenderer.invoke('broadcast:open', info),
-  closeBroadcastWindow: () => ipcRenderer.invoke('broadcast:close'),
-  onBroadcastClosed: (cb) => ipcRenderer.on('lan:broadcast-closed', () => cb()),
+  closeBroadcastWindow: (reason) => ipcRenderer.invoke('broadcast:close', reason),
+  onBroadcastClosed: (cb) =>
+    ipcRenderer.on('lan:broadcast-closed', (_e, p) => cb(p || {})),
   // 选择文件，返回 { path, name, size, mime } 或 null
   pickFile: () => ipcRenderer.invoke('pick:file'),
   // 打开文件 / 在资源管理器定位

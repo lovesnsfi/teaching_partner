@@ -128,6 +128,9 @@ export class LanDiscovery extends EventEmitter {
       JSON.stringify({
         type: 'hello',
         id: this.self.id,
+        // host：电脑设备名。本软件定位是「一台电脑一个实例」，主机名比昵称/IP 更适合
+        // 作为“这台电脑”的可读标识（昵称和 IP 都可能被用户改动）。
+        host: this.self.host || os.hostname(),
         name: this.self.name,
         port: this.self.port,
         ip: myIp,
@@ -154,11 +157,13 @@ export class LanDiscovery extends EventEmitter {
     if (data.id === this.self.id) return
 
     const ip = rinfo.address
+    const host = data.host || ''
     const existing = this.devices.get(data.id)
     if (!existing) {
       this.devices.set(data.id, {
         id: data.id,
         name: data.name,
+        host,
         ip,
         port: data.port,
         role: data.role,
@@ -172,10 +177,12 @@ export class LanDiscovery extends EventEmitter {
         existing.ip !== ip ||
         existing.name !== data.name ||
         existing.port !== data.port ||
+        existing.host !== host ||
         existing.avatar !== (data.avatar || '')
       ) {
         existing.ip = ip
         existing.name = data.name
+        existing.host = host
         existing.port = data.port
         existing.role = data.role
         existing.avatar = data.avatar || ''

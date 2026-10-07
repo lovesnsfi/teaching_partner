@@ -19,10 +19,36 @@
       </el-button>
     </div>
 
-    <div class="flex-1 overflow-auto p-4 space-y-3" ref="listEl">
+    <div
+      class="flex-1 overflow-auto p-4 space-y-3"
+      ref="listEl"
+      @scroll.passive="onScroll"
+    >
+      <!-- 顶部：更早消息的加载入口（虚拟窗口，聊天记录再长也不会一次性全渲染） -->
+      <div v-if="hiddenCount > 0" class="flex justify-center pt-1 pb-2">
+        <button
+          class="load-more-btn"
+          type="button"
+          :disabled="loadingMore"
+          @click="loadMore"
+        >
+          {{
+            loadingMore
+              ? '正在加载…'
+              : `向上滚动加载更早的消息（还有 ${hiddenCount} 条）`
+          }}
+        </button>
+      </div>
+      <p
+        v-else-if="totalCount > PAGE"
+        class="text-center text-[11px] text-slate-300 py-1"
+      >
+        已加载全部 {{ totalCount }} 条消息
+      </p>
+
       <div
-        v-for="(m, i) in store.activeMessages"
-        :key="i"
+        v-for="(m, i) in visibleMessages"
+        :key="offset + i"
         class="flex flex-col"
         :class="m.mine ? 'items-end' : 'items-start'"
       >
@@ -235,7 +261,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useStore } from '../store/index.js'
 import EmojiPicker from './EmojiPicker.vue'
 import Avatar from './Avatar.vue'
@@ -246,6 +272,45 @@ const listEl = ref(null)
 const composerEl = ref(null)
 const showPicker = ref(false)
 const pickerTab = ref('emoji')
+
+// ===== 聊天记录渲染窗口 =====
+// 一个会话最多缓存 400 条（见 store 的 MAX_MSG_PER_CONV），若一次性全部渲染，
+// 每条消息又包含头像 + 气泡 + 文件卡片等 DOM，节点数会迅速膨胀，拖慢渲染与滚动。
+// 因此只渲染最近 PAGE 条，向上滚动到顶部时再逐步加载更早的。
+const PAGE = 30
+const SCROLL_THRESHOLD = 48 // 距顶部多少像素内触发加载
+const visibleCount = ref(PAGE)
+const loadingMore = ref(false)
+
+const totalCount = computed(() => store.activeMessages.length)
+// 起始索引（用于生成稳定的 v-for key，避免 prepend 后 key 漂移）
+const offset = computed(() => Math.max(0, totalCount.value - visibleCount.value))
+const visibleMessages = computed(() => store.activeMessages.slice(offset.value))
+const hiddenCount = computed(() => offset.value)
+
+// 加载更早的一页。关键点：prepend 后要按「新增的高度差」回补 scrollTop，
+// 否则视口会猛地跳到顶部，用户会失去原来的阅读位置。
+async function loadMore() {
+  if (loadingMore.value || hiddenCount.value <= 0) return
+  loadingMore.value = true
+  const el = listEl.value
+  const prevHeight = el ? el.scrollHeight : 0
+  const prevTop = el ? el.scrollTop : 0
+  visibleCount.value = Math.min(totalCount.value, visibleCount.value + PAGE)
+  await nextTick()
+  if (el) {
+    el.scrollTop = prevTop + (el.scrollHeight - prevHeight)
+  }
+  loadingMore.value = false
+}
+
+function onScroll() {
+  const el = listEl.value
+  if (!el) return
+  if (el.scrollTop <= SCROLL_THRESHOLD && hiddenCount.value > 0) {
+    loadMore()
+  }
+}
 
 function fmt(ts) {
   if (!ts) return ''
@@ -318,9 +383,40 @@ watch(
     if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
   }
 )
+
+// 切换会话时重置渲染窗口，只显示该会话最近 PAGE 条
+watch(
+  () => store.activeChatId,
+  async () => {
+    visibleCount.value = PAGE
+    loadingMore.value = false
+    await nextTick()
+    if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
+  }
+)
 </script>
 
 <style scoped>
+/* 顶部「加载更早消息」按钮 */
+.load-more-btn {
+  padding: 4px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.load-more-btn:hover:not(:disabled) {
+  background: #eff6ff;
+  color: #2563eb;
+  border-color: #bfdbfe;
+}
+.load-more-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
 /* 文件消息卡片：发送方 / 接收方两种底色 */
 .file-card {
   display: flex;

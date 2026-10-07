@@ -15,7 +15,7 @@ const MAX_MSG_PER_CONV = 400
 export const useStore = defineStore('app', {
   state: () => {
     return {
-      self: { id: '', name: '', ip: '', port: 0, avatar: '' },
+      self: { id: '', host: '', name: '', ip: '', port: 0, avatar: '' },
       selectedInterface: 'auto',
       playSound: true, // 新消息提示音，默认开启（持久化于本地存储）
       soundUri: null, // 提示音 data URI，init 时从主进程加载
@@ -35,6 +35,9 @@ export const useStore = defineStore('app', {
         teacherStream: null,
         teacherActive: false,
         teacherInfo: null,
+        // 独立观看窗口当前是否开着。学生手动关掉窗口后仍保持 role='student'，
+        // 这样主窗口右栏能继续显示该老师并提供「重新打开观看窗口」。
+        viewerOpen: false,
         invitingTeachers: [],
         studentCount: 0,
         sourceId: null // 当前正在采集的源，广播中切画质/帧率需要复用它
@@ -73,17 +76,21 @@ export const useStore = defineStore('app', {
     // 离线联系人（曾上线但现在不在 devices 中）依然显示，头像置灰。
     contactList(state) {
       const online = new Map(state.devices.map((d) => [d.id, d]))
-      const list = (state.contacts || []).map((c) => ({
-        id: c.id,
-        name: c.name || '',
-        avatar: c.avatar || '',
-        ip: c.ip || '',
-        port: c.port || 0,
-        role: c.role || 'user',
-        firstSeen: c.firstSeen || 0,
-        lastOnline: c.lastOnline || 0,
-        online: online.has(c.id)
-      }))
+      // 排除自己：正常情况下发现层已过滤，但历史脏数据里可能存有自己的旧 ID
+      const list = (state.contacts || [])
+        .filter((c) => c.id !== state.self.id)
+        .map((c) => ({
+          id: c.id,
+          host: c.host || '',
+          name: c.name || '',
+          avatar: c.avatar || '',
+          ip: c.ip || '',
+          port: c.port || 0,
+          role: c.role || 'user',
+          firstSeen: c.firstSeen || 0,
+          lastOnline: c.lastOnline || 0,
+          online: online.has(c.id)
+        }))
       list.sort((a, b) => {
         // 当前在线的始终排在最前面
         if (a.online !== b.online) return a.online ? -1 : 1
@@ -139,13 +146,30 @@ export const useStore = defineStore('app', {
     // 离线联系人不会被删除，仅当重新上线时刷新其 lastOnline / 资料。
     _mergeContacts(onlineList) {
       const now = Date.now()
-      const map = new Map((this.contacts || []).map((c) => [c.id, c]))
-      for (const d of onlineList || []) {
+      const list = onlineList || []
+      // 在线设备是权威数据：先把「同一台电脑的历史分身」剔除 —— 判定依据是
+      // 设备 ID / 主机名(host) / IP，**刻意不使用昵称**：昵称随时可改，不能当身份。
+      const onlineIds = new Set(list.map((d) => d && d.id).filter(Boolean))
+      const onlineHosts = new Set(
+        list.map((d) => ((d && d.host) || '').trim().toLowerCase()).filter(Boolean)
+      )
+      const onlineIps = new Set(list.map((d) => d && d.ip).filter(Boolean))
+      const kept = (this.contacts || []).filter((c) => {
+        if (!c || !c.id) return false
+        if (onlineIds.has(c.id)) return true
+        const h = (c.host || '').trim().toLowerCase()
+        if (h && onlineHosts.has(h)) return false
+        if (c.ip && onlineIps.has(c.ip)) return false
+        return true
+      })
+      const map = new Map(kept.map((c) => [c.id, c]))
+      for (const d of list) {
         if (!d || !d.id) continue
         const prev = map.get(d.id)
         map.set(d.id, {
           id: d.id,
-          name: d.name || '',
+          host: d.host || (prev && prev.host) || '',
+          name: d.name || (prev && prev.name) || '',
           avatar: d.avatar || '',
           ip: d.ip || '',
           port: d.port || 0,
@@ -164,6 +188,120 @@ export const useStore = defineStore('app', {
       } catch {
         /* ignore */
       }
+    },
+    // 登记 / 更新单个联系人。已存在时只补充「之前为空」的字段，
+    // 避免用空值覆盖掉 UDP 发现拿到的真实资料。
+    _upsertContact(info) {
+      if (!info || !info.id) return
+      const now = Date.now()
+      const list = this.contacts || []
+      const idx = list.findIndex((c) => c.id === info.id)
+      if (idx >= 0) {
+        const prev = list[idx]
+        this.contacts.splice(idx, 1, {
+          ...prev,
+          host: info.host || prev.host || '',
+          name: info.name || prev.name || '',
+          avatar: info.avatar || prev.avatar || '',
+          ip: info.ip || prev.ip || '',
+          port: info.port || prev.port || 0,
+          role: info.role || prev.role || 'user',
+          lastOnline: info.online === false ? prev.lastOnline : now
+        })
+      } else {
+        this.contacts.push({
+          id: info.id,
+          host: info.host || '',
+          name: info.name || '',
+          avatar: info.avatar || '',
+          ip: info.ip || '',
+          port: info.port || 0,
+          role: info.role || 'user',
+          firstSeen: now,
+          lastOnline: now
+        })
+      }
+      this._persistContacts()
+    },
+    // 清理历史重复联系人。
+    // 早期版本设备 ID 每次启动都变，导致同一台电脑在 contacts 表里堆积多条记录。
+    // 归并只认「主机名 / IP」这类机器特征，**不认昵称** —— 昵称是用户可改的属性：
+    // 两个人可能同名，同一个人也可能改昵称，都不能用来判断是不是同一台电脑。
+    _dedupeContacts() {
+      const list = (this.contacts || []).filter((c) => c && c.id)
+      // 合并时保留信息更全、且最近在线的那条
+      const better = (a, b) => {
+        const score = (x) => (x.ip ? 2 : 0) + (x.avatar ? 1 : 0) + (x.host ? 1 : 0)
+        const sa = score(a)
+        const sb = score(b)
+        if (sa !== sb) return sa > sb ? a : b
+        return (a.lastOnline || 0) >= (b.lastOnline || 0) ? a : b
+      }
+      const merged = new Map() // key -> contact
+      const order = []
+      const put = (key, c) => {
+        if (!key) {
+          order.push(c)
+          return
+        }
+        if (!merged.has(key)) {
+          merged.set(key, c)
+          order.push(c)
+        } else {
+          const old = merged.get(key)
+          const keep = better(old, c)
+          const idx = order.indexOf(old)
+          if (idx >= 0) order[idx] = keep
+          merged.set(key, keep)
+        }
+      }
+      // 第一轮：同一台电脑（主机名相同）——这是最可靠的机器特征
+      for (const c of list) put(c.host ? 'h:' + c.host.trim().toLowerCase() : null, c)
+      // 第二轮：没有主机名的旧数据，退而用 IP 归并（同一时刻同一 IP 基本就是同一台机器）
+      for (const c of order) {
+        if (!c.host && c.ip) put('ip:' + c.ip, c)
+      }
+
+      const before = list.length
+      this.contacts = order
+      if (before !== order.length) {
+        console.log(`[store] 联系人去重：${before} → ${order.length}`)
+        this._persistContacts()
+      }
+    },
+    // 自愈回填：contacts 表为空（例如该功能是后期新增的）时，从历史聊天记录里
+    // 把「曾经聊过的人」恢复成联系人。消息表里有 fromId / fromName / fromAvatar，
+    // 唯独没有 IP，离线状态下显示为「离线」；等对方再次上线，UDP 发现会补全 IP。
+    // 注：用户删除联系人时会同步删掉该会话的消息，所以被删的人不会被这里复活。
+    _backfillContactsFromMessages() {
+      // 仅在联系人完全为空时回填，避免每次启动都翻历史消息
+      if ((this.contacts || []).length) return
+      const known = new Set((this.contacts || []).map((c) => c.id))
+      const candidates = new Map()
+      for (const convId of Object.keys(this.messages || {})) {
+        for (const m of this.messages[convId] || []) {
+          const id = m && m.from
+          if (!id || id === this.self.id || known.has(id)) continue
+          const prev = candidates.get(id)
+          if (!prev) {
+            candidates.set(id, {
+              id,
+              name: m.fromName || '',
+              avatar: m.fromAvatar || '',
+              ts: m.ts || 0
+            })
+          } else if (m.ts && m.ts > prev.ts) {
+            prev.name = m.fromName || prev.name
+            prev.avatar = m.fromAvatar || prev.avatar
+            prev.ts = m.ts
+          }
+        }
+      }
+      if (!candidates.size) return
+      for (const c of candidates.values()) {
+        this._upsertContact({ id: c.id, name: c.name, avatar: c.avatar })
+      }
+      console.log('[store] 已从聊天记录回填联系人：', candidates.size)
     },
     // 增量落库：新消息推入内存数组并写入本地存储（SQLite / JSON）
     _appendMsg(convId, msg) {
@@ -249,6 +387,10 @@ export const useStore = defineStore('app', {
       this.messages = dbData.messages || {}
       // 载入持久化联系人（含历史离线联系人），作为左侧「联系人」列表的基底
       this.contacts = dbData.contacts || []
+      // contacts 表为空时，从历史聊天记录回填，避免"聊过的人用完就没了"
+      this._backfillContactsFromMessages()
+      // 早期版本设备 ID 不稳定会堆积同名重复项，这里统一归并
+      this._dedupeContacts()
       window.api.onDevices((list) => {
         this.devices = list
         // 设备（在线）变化时，并入持久化联系人并落库，离线者保留不删
@@ -298,11 +440,18 @@ export const useStore = defineStore('app', {
         if (this.fileSend[m.fileId]) this.fileSend[m.fileId].sending = false
         this._patchFileMsg(m.fileId, { waiting: false, sending: false, rejected: true })
       })
-      // 独立观看窗口被关闭（手动关闭 / 老师停播）→ 复位学生端状态
-      window.api.onBroadcastClosed(() => {
-        this.broadcast.role = null
-        this.broadcast.teacherStream = null
-        this.broadcast.teacherInfo = null
+      // 独立观看窗口被关闭。
+      // 关键：只有「老师停播 / 主动离开」才退出学生身份；
+      // 学生自己关掉观看窗口时保留 role / teacherInfo，右栏继续显示该老师，
+      // 并提供「重新打开观看窗口」，否则关一次窗口就再也加不回去了。
+      window.api.onBroadcastClosed((p) => {
+        const reason = (p && p.reason) || 'closed'
+        this.broadcast.viewerOpen = false
+        if (reason === 'teacher-stopped' || reason === 'leave') {
+          this.broadcast.role = null
+          this.broadcast.teacherStream = null
+          this.broadcast.teacherInfo = null
+        }
       })
       this.status = 'ready'
       // 加载提示音（base64 data URI），用于新消息播放
@@ -354,11 +503,22 @@ export const useStore = defineStore('app', {
     },
     // 手动删除一个联系人（仅允许删除离线联系人，见 DeviceList 右键菜单约束）。
     // 删除后落库；若该联系人之后再次上线，_mergeContacts 会重新并入，属预期行为。
+    // 删除离线联系人 = 清除与该设备的会话记录。
+    // 联系人身份本身绑定的是「设备」（稳定的机器 ID + 主机名），所以对方之后
+    // 重新上线时会被 UDP 发现重新并入列表，只是不再带有历史聊天记录。
     deleteContact(id) {
       if (!id) return
+      // 在线联系人不可删除：对方此刻就在列表里，删掉会立刻又被并回来。
+      // UI 已经拦了一层，这里再兜底一次，避免菜单状态过期导致误删。
+      if ((this.devices || []).some((d) => d.id === id)) return
+      // 1) 从联系人列表移除
       this.contacts = (this.contacts || []).filter((c) => c.id !== id)
-      if (this.activeChatId === id) this.activeChatId = null
       this._persistContacts()
+      // 2) 同步清除与该联系人的全部聊天记录（内存 + 本地库）
+      this.messages = { ...this.messages, [id]: [] }
+      this.unread[id] = 0
+      window.api.dbDeleteMessages(id)
+      if (this.activeChatId === id) this.activeChatId = null
     },
     // 取群内成员当前在线 IP（排除自己）
     _memberIps(group) {
@@ -462,6 +622,15 @@ export const useStore = defineStore('app', {
     receiveChat(msg) {
       const convId = msg.toKind === 'group' ? msg.groupId : msg.from
       if (!convId) return
+      // 收到消息即证明对方此刻在线，顺手登记为联系人（UDP 发现漏掉时的兜底）
+      if (msg.from && msg.from !== this.self.id) {
+        this._upsertContact({
+          id: msg.from,
+          name: msg.fromName || '',
+          avatar: msg.fromAvatar || '',
+          ip: msg._from || ''
+        })
+      }
       this._appendMsg(convId, {
         from: msg.from,
         fromName: msg.fromName || '对方',
@@ -703,6 +872,7 @@ export const useStore = defineStore('app', {
     joinBroadcast(teacher) {
       this.broadcast.role = 'student'
       this.broadcast.teacherInfo = teacher
+      this.broadcast.viewerOpen = true
       this.broadcast.invitingTeachers = this.broadcast.invitingTeachers.filter(
         (t) => t.id !== teacher.id
       )
@@ -714,18 +884,21 @@ export const useStore = defineStore('app', {
         })
       }
     },
-    // 重新打开（用户手动关掉观看窗口后想再看）
+    // 重新打开观看窗口（用户手动关掉后想再看）。老师端的旧连接已在窗口关闭时
+    // 通过 leave 信号清理，这里再发一次 request 会拿到一条全新的 PeerConnection。
     reopenBroadcastWindow() {
       const t = this.broadcast.teacherInfo
       if (t && window.api.openBroadcastWindow) {
+        this.broadcast.viewerOpen = true
         window.api.openBroadcastWindow({ id: t.id, name: t.name, ip: t.ip })
       }
     },
     leaveBroadcast() {
-      if (window.api.closeBroadcastWindow) window.api.closeBroadcastWindow()
+      if (window.api.closeBroadcastWindow) window.api.closeBroadcastWindow('leave')
       this.broadcast.role = null
       this.broadcast.teacherStream = null
       this.broadcast.teacherInfo = null
+      this.broadcast.viewerOpen = false
     },
     receiveSignal(msg) {
       const { payload, from, fromName, _from } = msg
@@ -742,6 +915,14 @@ export const useStore = defineStore('app', {
         case 'request':
           if (this.broadcast.role === 'teacher') {
             this.getBroadcaster().addStudent({ id: from, ip: _from })
+            this.broadcast.studentCount = this.getBroadcaster().peers.size
+          }
+          break
+        case 'leave':
+          // 学生关掉了观看窗口：移除该连接，否则 peers 里残留僵尸连接，
+          // 学生再次进入时 addStudent 会直接 return，导致新窗口连不上画面。
+          if (this.broadcast.role === 'teacher') {
+            this.getBroadcaster().removeStudent(from)
             this.broadcast.studentCount = this.getBroadcaster().peers.size
           }
           break

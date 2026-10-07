@@ -73,7 +73,10 @@ export class TeacherBroadcaster {
   }
 
   addStudent(student) {
-    if (this.peers.has(student.id)) return
+    // 学生每次打开观看窗口都会重新发 request。若这里还留着上一次的连接
+    // （例如 leave 信号在路上丢了），必须先关掉重建，否则旧的 PeerConnection
+    // 已随窗口销毁而失效，学生端会一直卡在「正在连接」。
+    if (this.peers.has(student.id)) this.removeStudent(student.id)
     const pc = new RTCPeerConnection({ iceServers: [] })
     this.stream.getTracks().forEach((t) => pc.addTrack(t, this.stream))
     // 限制视频编码码率：这是决定带宽占用与延迟的关键

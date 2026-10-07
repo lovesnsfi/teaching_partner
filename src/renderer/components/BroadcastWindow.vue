@@ -52,6 +52,8 @@ const isFullscreen = ref(false)
 const statusText = computed(() => (hasStream.value ? '画面已连接' : '连接中…'))
 
 let receiver = null
+// 本窗口是否已向老师发出「退出」信号，避免重复发送
+let leaveSent = false
 
 function toggleFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen()
@@ -62,11 +64,25 @@ function onFsChange() {
   isFullscreen.value = !!document.fullscreenElement
 }
 
-function close() {
+// reason: 'closed' 学生手动关窗 | 'teacher-stopped' 老师停播
+function close(reason = 'closed') {
+  notifyLeave()
   if (window.api && window.api.closeBroadcastWindow) {
-    window.api.closeBroadcastWindow()
+    window.api.closeBroadcastWindow(reason)
   } else {
     window.close()
+  }
+}
+
+// 通知老师本端已退出，让老师移除这条 PeerConnection（否则老师端会残留僵尸连接，
+// 再次进入时 addStudent 会因 peers 里已存在而直接 return，导致新窗口一直连不上）
+function notifyLeave() {
+  if (leaveSent || !teacherIp) return
+  leaveSent = true
+  try {
+    window.api.sendSignal(teacherIp, { kind: 'leave' })
+  } catch {
+    /* ignore */
   }
 }
 
@@ -91,7 +107,7 @@ onMounted(() => {
     } else if (payload.kind === 'bye') {
       // 老师停止广播：关闭本窗口
       hasStream.value = false
-      close()
+      close('teacher-stopped')
     }
   })
   // 向老师发起推流请求
@@ -99,12 +115,14 @@ onMounted(() => {
   document.addEventListener('fullscreenchange', onFsChange)
   // 窗口关闭时彻底断开 PeerConnection，避免老师端残留连接
   window.addEventListener('beforeunload', () => {
+    notifyLeave()
     if (receiver) receiver.stop()
   })
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', onFsChange)
+  notifyLeave()
   if (receiver) {
     receiver.stop()
     receiver = null

@@ -11,7 +11,7 @@
         class="no-drag"
       />
       <span class="text-white/80 text-[13px]"
-        >{{ store.self.name }} · {{ store.self.ip }}</span
+        >{{ store.self.name }} · {{ store.self.host || store.self.ip }}</span
       >
       <el-button
         class="no-drag ml-auto header-btn"

@@ -1,5 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain, dialog, shell, Menu, Tray } from 'electron'
 import { join, extname, basename } from 'node:path'
+import os from 'node:os'
 import {
   readFileSync,
   writeFileSync,
@@ -35,8 +36,12 @@ let win = null
 let tray = null
 let forceQuit = false
 const trayIcon = getAppIcon()
-const SELF_ID = randomUUID()
-let myName = '用户-' + SELF_ID.slice(0, 4)
+// 本机设备 ID：必须跨重启保持稳定！
+// 若每次启动都换新 ID，对端会认为「你」变成了一台全新设备，旧的那条记录会永久
+// 残留在双方联系人表里 —— 表现为联系人列表出现大量同名重复项。
+// 因此启动时从 userData 目录读写一个固定 ID（见 loadOrCreateSelfId）。
+let SELF_ID = ''
+let myName = ''
 let myAvatar = ''
 let discovery = null
 let signaling = null
@@ -66,6 +71,8 @@ const sendState = new Map()
 
 // ===== 学生端「屏幕广播」独立观看窗口 =====
 let broadcastWin = null
+// 观看窗口关闭的原因，随 'closed' 事件一并传给主窗口（见 createBroadcastWindow）
+let closeReason = ''
 
 // 定位打包内置头像目录：dev 在 app.getAppPath()/assets/avatar，
 // 打包后由 extraResources 放在 resources/assets/avatar。
@@ -169,27 +176,37 @@ function createBroadcastWindow(info = {}) {
   }
   broadcastWin.on('closed', () => {
     broadcastWin = null
-    // 通知主窗口复位学生端广播状态（手动关窗 / 老师停播都会走到这里）
-    if (win) win.webContents.send('lan:broadcast-closed')
+    // 通知主窗口：区分「学生自己关掉了观看窗口」与「老师停播」——
+    // 前者要保留学生身份（主窗口仍显示「重新打开观看窗口」），后者才彻底退出。
+    if (win) win.webContents.send('lan:broadcast-closed', { reason: closeReason })
+    closeReason = ''
   })
   return broadcastWin
 }
 
-function closeBroadcastWindow() {
+// reason: 'closed'（学生手动关窗，默认） | 'teacher-stopped'（老师停播） | 'leave'（主动离开广播）
+function closeBroadcastWindow(reason = 'closed') {
   const w = broadcastWin
+  if (!w || w.isDestroyed()) {
+    // 窗口已不存在也要把状态同步给主窗口，否则主窗口会一直以为窗口还开着
+    broadcastWin = null
+    if (win) win.webContents.send('lan:broadcast-closed', { reason })
+    return
+  }
+  closeReason = reason
   broadcastWin = null
-  if (w && !w.isDestroyed()) {
-    try {
-      w.close()
-    } catch {
-      /* ignore */
-    }
+  try {
+    w.close()
+  } catch {
+    /* ignore */
   }
 }
 
 function selfInfo() {
   return {
     id: SELF_ID,
+    // host：电脑设备名，作为“这台电脑”的稳定可读标识（与昵称、IP 无关）
+    host: os.hostname(),
     name: myName,
     ip: getLanIp(),
     port: SIGNAL_PORT,
@@ -469,12 +486,59 @@ async function sendFileToIps(ips, file, fileId, convId, groupId) {
   return true
 }
 
+// 读取或创建本机稳定设备 ID（持久化到 userData/self-id.txt）
+function loadOrCreateSelfId(userDataDir) {
+  const f = join(userDataDir, 'self-id.txt')
+  try {
+    if (existsSync(f)) {
+      const v = readFileSync(f, 'utf8').trim()
+      if (v) return v
+    }
+  } catch {
+    /* ignore */
+  }
+  const id = randomUUID()
+  try {
+    mkdirSync(userDataDir, { recursive: true })
+    writeFileSync(f, id, 'utf8')
+  } catch (e) {
+    console.warn('[id] 无法写入 self-id.txt，本次将使用临时 ID：', (e && e.message) || e)
+  }
+  return id
+}
+
 app.whenReady().then(async () => {
   // 去掉 Electron 自带菜单栏
   Menu.setApplicationMenu(null)
 
-  // 初始化本地持久化（SQLite 优先，未安装则 JSON 文件降级）
-  persist = await createPersistence(app.getPath('userData'))
+  // 本机稳定设备 ID + 默认昵称（必须在建发现/信令服务之前就绪）
+  SELF_ID = loadOrCreateSelfId(app.getPath('userData'))
+  myName = '用户-' + SELF_ID.slice(0, 4)
+  console.log('[id] 本机设备 ID：', SELF_ID)
+
+  // 初始化本地持久化（node-sqlite3-wasm 单后端）。
+  // 失败时不静默降级 —— 直接弹窗告知用户，否则会出现
+  // 「聊天记录 / 联系人 / 设置看着正常，实际每次重启都丢」的假象。
+  try {
+    persist = await createPersistence(app.getPath('userData'))
+  } catch (e) {
+    const reason = (e && e.message) || String(e)
+    console.error('[persist] 初始化失败：', reason)
+    dialog.showErrorBox(
+      '本地数据初始化失败',
+      [
+        '无法打开本地数据库，聊天记录、联系人和设置将无法保存。',
+        '',
+        `原因：${reason}`,
+        '',
+        '数据库文件：',
+        join(app.getPath('userData'), 'lan-chat.db'),
+        '',
+        '请确认该目录可写；若文件已损坏，可将其改名备份后重新启动',
+        '（注意：改名后历史数据将不再显示）。',
+      ].join('\n')
+    )
+  }
 
   // 自动更新：传入窗口 getter（窗口可由托盘恢复重建，故用函数取值）
   setupAutoUpdater(() => win)
@@ -674,9 +738,15 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('db:replaceContacts', (_, list) => {
     try {
-      if (persist) persist.replaceContacts(list || [])
-    } catch {
-      /* ignore */
+      if (persist) {
+        persist.replaceContacts(list || [])
+        console.log(`[persist] 已写入联系人 ${(list || []).length} 个`)
+      } else {
+        console.warn('[persist] replaceContacts 失败：持久化后端尚未就绪')
+      }
+    } catch (e) {
+      // 这里不能静默吞掉——否则联系人写不进去时界面毫无察觉，很难排查
+      console.error('[persist] replaceContacts 出错：', (e && e.message) || e)
     }
   })
   ipcMain.handle('db:appendMessage', (_, m) => {
@@ -692,6 +762,16 @@ app.whenReady().then(async () => {
     } catch {
       /* ignore */
     }
+  })
+
+  // 删除某会话的全部消息（右键删除联系人时同步清理聊天记录）
+  ipcMain.handle('db:deleteMessages', (_, convId) => {
+    try {
+      if (persist) return persist.deleteMessages(convId)
+    } catch (e) {
+      console.error('[persist] deleteMessages 出错：', (e && e.message) || e)
+    }
+    return 0
   })
 
   // 供 renderer 主动拉取当前已发现的设备列表（消除「初始发现事件早于
@@ -793,8 +873,8 @@ app.whenReady().then(async () => {
     createBroadcastWindow(info || {})
     return true
   })
-  ipcMain.handle('broadcast:close', () => {
-    closeBroadcastWindow()
+  ipcMain.handle('broadcast:close', (_, reason) => {
+    closeBroadcastWindow(reason || 'closed')
     return true
   })
 
