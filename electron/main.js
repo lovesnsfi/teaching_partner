@@ -8,7 +8,8 @@ import {
   mkdirSync,
   renameSync,
   existsSync,
-  statSync
+  statSync,
+  readdirSync
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import {
@@ -19,7 +20,7 @@ import {
   listInterfaces
 } from './lan.js'
 import { Signaling } from './signaling.js'
-import { createTrayIcon } from './icon.js'
+import { getAppIcon } from './icon.js'
 import { createPersistence } from './persist.js'
 
 // CJS 环境下 __dirname 为内置全局，无需自行定义
@@ -32,7 +33,7 @@ const CHUNK_SIZE = 24 * 1024 // base64 前的二进制分片大小
 let win = null
 let tray = null
 let forceQuit = false
-const trayIcon = createTrayIcon()
+const trayIcon = getAppIcon()
 const SELF_ID = randomUUID()
 let myName = '用户-' + SELF_ID.slice(0, 4)
 let myAvatar = ''
@@ -51,6 +52,25 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 // 文件接收状态：fileId -> { stream, tmp, received, total, convId, groupId, fromName, name, size, mime }
 const fileRecv = new Map()
+
+// 定位打包内置头像目录：dev 在 app.getAppPath()/assets/avatar，
+// 打包后由 extraResources 放在 resources/assets/avatar。
+function avatarDir() {
+  const candidates = [
+    join(app.getAppPath(), 'assets', 'avatar'),
+    join(__dirname, '../../assets/avatar'),
+    join(__dirname, '../assets/avatar'),
+    join(process.resourcesPath || '', 'assets', 'avatar')
+  ]
+  for (const p of candidates) {
+    try {
+      if (p && existsSync(p) && statSync(p).isDirectory()) return p
+    } catch {
+      /* 尝试下一个候选路径 */
+    }
+  }
+  return null
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -320,6 +340,67 @@ app.whenReady().then(async () => {
     return myAvatar
   })
 
+  // 读取打包内置头像目录（assets/avatar），返回 [{ id, url }]，
+  // url 为 base64 data URI，可直接用于 <img src>。
+  // 取值语义：avatar 字符串用 "asset:<id>" 形式，网络/存储只传小 id，
+  // 渲染时再本地解析成图片，避免 UDP 广播包被大体积 base64 撑爆。
+  ipcMain.handle('get:avatars', () => {
+    const dir = avatarDir()
+    if (!dir) return []
+    let files = []
+    try {
+      files = readdirSync(dir)
+    } catch {
+      return []
+    }
+    const EXT_MIME = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp'
+    }
+    // 按文件头（magic bytes）判定真实 MIME：用户放入的文件可能出现
+    // 「扩展名与内容不符」的情况（例如 a17.jpeg 实际是 WebP 内容），
+    // 仅靠扩展名会把错误的 MIME 发给浏览器，导致图片无法渲染。
+    // 这里优先用文件头判定，扩展名仅作为回退。
+    function detectMime(f, buf) {
+      const h = buf.slice(0, 12)
+      // JPEG: FF D8 FF
+      if (h[0] === 0xff && h[1] === 0xd8 && h[2] === 0xff) return 'image/jpeg'
+      // PNG: 89 50 4E 47
+      if (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4e && h[3] === 0x47) return 'image/png'
+      // WebP: 'RIFF' .... 'WEBP'
+      if (h[0] === 0x52 && h[1] === 0x49 && h[2] === 0x46 && h[3] === 0x46 &&
+          h[8] === 0x57 && h[9] === 0x45 && h[10] === 0x42 && h[11] === 0x50) return 'image/webp'
+      // GIF: 'GIF8'
+      if (h[0] === 0x47 && h[1] === 0x49 && h[2] === 0x46) return 'image/gif'
+      // 回退：扩展名（含 a16.jpeg_webp 这类复合后缀按 _webp 处理）
+      const lower = f.toLowerCase()
+      if (lower.endsWith('_webp')) return 'image/webp'
+      const ext = extname(lower)
+      if (EXT_MIME[ext]) return EXT_MIME[ext]
+      return null
+    }
+    const list = []
+    for (const f of files) {
+      const lower = f.toLowerCase()
+      // 仅处理图片类文件（含 a16.jpeg_webp 这种复合后缀）
+      if (!/\.(jpe?g|png|webp|gif)$/.test(lower) && !lower.endsWith('_webp')) continue
+      try {
+        const buf = readFileSync(join(dir, f))
+        const mime = detectMime(f, buf)
+        if (!mime) continue
+        const ext = extname(lower)
+        const id = basename(f, ext)
+        list.push({ id, url: `data:${mime};base64,${buf.toString('base64')}` })
+      } catch {
+        /* 跳过读取失败的文件 */
+      }
+    }
+    list.sort((a, b) => a.id.localeCompare(b.id))
+    return list
+  })
+
   // 读取提示音文件并返回 base64 data URI，renderer 用它播放新消息提示音
   let soundUriCache = null
   ipcMain.handle('get:sound', () => {
@@ -343,12 +424,14 @@ app.whenReady().then(async () => {
     return null
   })
 
-  // ===== 本地持久化接口（聊天记录 + 设置，SQLite / JSON 文件）=====
+  // ===== 本地持久化接口（聊天记录 + 设置 + 联系人，SQLite / JSON 文件）=====
   ipcMain.handle('db:load', () => {
     try {
-      return persist ? persist.load() : { settings: {}, groups: [], messages: {} }
+      return persist
+        ? persist.load()
+        : { settings: {}, groups: [], messages: {}, contacts: [] }
     } catch {
-      return { settings: {}, groups: [], messages: {} }
+      return { settings: {}, groups: [], messages: {}, contacts: [] }
     }
   })
   ipcMain.handle('db:saveSettings', (_, obj) => {
@@ -361,6 +444,13 @@ app.whenReady().then(async () => {
   ipcMain.handle('db:replaceGroups', (_, groups) => {
     try {
       if (persist) persist.replaceGroups(groups || [])
+    } catch {
+      /* ignore */
+    }
+  })
+  ipcMain.handle('db:replaceContacts', (_, list) => {
+    try {
+      if (persist) persist.replaceContacts(list || [])
     } catch {
       /* ignore */
     }

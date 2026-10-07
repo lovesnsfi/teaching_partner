@@ -17,7 +17,17 @@ const DDL = [
      fileId TEXT, fileJson TEXT,
      mine INTEGER, receiving INTEGER, sending INTEGER
    )`,
-  'CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(convId)'
+  'CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(convId)',
+  `CREATE TABLE IF NOT EXISTS contacts (
+     id TEXT PRIMARY KEY,
+     name TEXT,
+     avatar TEXT,
+     ip TEXT,
+     port INTEGER,
+     role TEXT,
+     firstSeen INTEGER,
+     lastOnline INTEGER
+   )`
 ]
 
 /**
@@ -161,7 +171,17 @@ function makeSqlite(db) {
           })
         )
       }
-      return { settings, groups, messages }
+      const contacts = db.all('SELECT * FROM contacts').map((r) => ({
+        id: r.id,
+        name: r.name || '',
+        avatar: r.avatar || '',
+        ip: r.ip || '',
+        port: r.port || 0,
+        role: r.role || 'user',
+        firstSeen: r.firstSeen || 0,
+        lastOnline: r.lastOnline || 0
+      }))
+      return { settings, groups, messages, contacts }
     },
     saveSettings(obj) {
       db.run('INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)', [
@@ -181,6 +201,26 @@ function makeSqlite(db) {
               g.ownerId,
               JSON.stringify(g.members || []),
               g.createdAt || Date.now()
+            ]
+          )
+        }
+      })
+    },
+    replaceContacts(list) {
+      db.transaction(() => {
+        db.run('DELETE FROM contacts')
+        for (const c of list || []) {
+          db.run(
+            'INSERT OR REPLACE INTO contacts(id, name, avatar, ip, port, role, firstSeen, lastOnline) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+              c.id,
+              c.name || '',
+              c.avatar || '',
+              c.ip || '',
+              c.port || 0,
+              c.role || 'user',
+              c.firstSeen || Date.now(),
+              c.lastOnline || Date.now()
             ]
           )
         }
@@ -232,11 +272,12 @@ function makeSqlite(db) {
 
 function makeJson(path) {
   function read() {
-    if (!existsSync(path)) return { settings: {}, groups: [], messages: {} }
+    if (!existsSync(path)) return { settings: {}, groups: [], messages: {}, contacts: [] }
     return safeParse(readFileSync(path, 'utf8'), {
       settings: {},
       groups: [],
-      messages: {}
+      messages: {},
+      contacts: []
     })
   }
   function write(data) {
@@ -259,7 +300,8 @@ function makeJson(path) {
       return {
         settings: d.settings || {},
         groups: d.groups || [],
-        messages
+        messages,
+        contacts: d.contacts || []
       }
     },
     saveSettings(obj) {
@@ -270,6 +312,11 @@ function makeJson(path) {
     replaceGroups(groups) {
       const d = read()
       d.groups = groups || []
+      write(d)
+    },
+    replaceContacts(list) {
+      const d = read()
+      d.contacts = list || []
       write(d)
     },
     appendMessage(m) {

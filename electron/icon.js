@@ -1,7 +1,40 @@
-import { nativeImage } from 'electron'
-import { deflateSync } from 'node:zlib'
+import { nativeImage, app } from 'electron'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 
-// CRC32 表
+// 定位打包内置图标 assets/ico/app.ico：
+//  - dev：app.getAppPath()/assets/ico/app.ico
+//  - 打包后：extraResources 把 assets 拷贝到 resources/assets
+function resolveIconPath() {
+  const candidates = [
+    join(app.getAppPath(), 'assets', 'ico', 'app.ico'),
+    join(process.resourcesPath || '', 'assets', 'ico', 'app.ico'),
+    join(__dirname, '../../assets/ico/app.ico'),
+    join(__dirname, '../assets/ico/app.ico')
+  ]
+  for (const p of candidates) {
+    try {
+      if (p && existsSync(p)) return p
+    } catch {
+      /* 尝试下一个候选路径 */
+    }
+  }
+  return null
+}
+
+// 应用图标（托盘 / 窗口标题栏 / 任务栏）。
+// 优先使用 assets/ico/app.ico；文件缺失时降级为内置生成的蓝圆 PNG，避免崩溃。
+export function getAppIcon() {
+  const p = resolveIconPath()
+  if (p) {
+    const img = nativeImage.createFromPath(p)
+    if (!img.isEmpty()) return img
+  }
+  return createFallbackIcon()
+}
+
+// ===== 兜底：纯代码生成蓝底白心圆形 PNG（仅在找不到 app.ico 时启用）=====
+
 const CRC_TABLE = (() => {
   const t = new Int32Array(256)
   for (let n = 0; n < 256; n++) {
@@ -49,8 +82,7 @@ function encodePNG(width, height, rgba) {
   ])
 }
 
-// 生成一个简单的蓝底白心圆形图标，用于托盘与窗口
-export function createTrayIcon(size = 64) {
+function createFallbackIcon(size = 64) {
   const buf = Buffer.alloc(size * size * 4)
   const set = (x, y, r, g, b, a = 255) => {
     if (x < 0 || y < 0 || x >= size || y >= size) return

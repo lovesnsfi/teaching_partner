@@ -24,6 +24,9 @@ export const useStore = defineStore('app', {
       playSound: true, // 新消息提示音，默认开启（持久化于本地存储）
       soundUri: null, // 提示音 data URI，init 时从主进程加载
       devices: [],
+      // 联系人：持久化的全量列表（含离线联系人在内，凡上线过的都会出现）。
+      // 与 devices（仅当前在线的临时列表）不同，contacts 跨重启保留。
+      contacts: [],
       activeChatId: null,
       messages: {}, // convId(deviceId 或 groupId) -> [{...}]，落库于主进程
       groups: [], // [{ id, name, ownerId, members:[ids] }]
@@ -69,6 +72,35 @@ export const useStore = defineStore('app', {
     activeMessages(state) {
       return state.messages[state.activeChatId] || []
     },
+    // 联系人视图：合并「持久化联系人」与「当前在线设备」，
+    // 标记 online 状态并按「在线优先 → 离线按最近在线时间倒序」排序。
+    // 离线联系人（曾上线但现在不在 devices 中）依然显示，头像置灰。
+    contactList(state) {
+      const online = new Map(state.devices.map((d) => [d.id, d]))
+      const list = (state.contacts || []).map((c) => ({
+        id: c.id,
+        name: c.name || '',
+        avatar: c.avatar || '',
+        ip: c.ip || '',
+        port: c.port || 0,
+        role: c.role || 'user',
+        firstSeen: c.firstSeen || 0,
+        lastOnline: c.lastOnline || 0,
+        online: online.has(c.id)
+      }))
+      list.sort((a, b) => {
+        // 当前在线的始终排在最前面
+        if (a.online !== b.online) return a.online ? -1 : 1
+        // 同段内：在线按昵称，离线按最近在线时间倒序
+        if (a.online) return (a.name || '').localeCompare(b.name || '')
+        return (b.lastOnline || 0) - (a.lastOnline || 0)
+      })
+      return list
+    },
+    // 当前在线联系人数（等于 devices 长度）
+    onlineContactCount(state) {
+      return state.devices.length
+    },
     // 群成员名字列表（用于群头展示）
     activeGroupMemberNames(state) {
       if (!state.activeChatId || !state.activeChatId.startsWith('group:'))
@@ -103,6 +135,36 @@ export const useStore = defineStore('app', {
       this._saveSettings()
       try {
         window.api.dbReplaceGroups(this.groups)
+      } catch {
+        /* ignore */
+      }
+    },
+    // 将当前在线设备并入联系人表（新增或更新），并持久化。
+    // 离线联系人不会被删除，仅当重新上线时刷新其 lastOnline / 资料。
+    _mergeContacts(onlineList) {
+      const now = Date.now()
+      const map = new Map((this.contacts || []).map((c) => [c.id, c]))
+      for (const d of onlineList || []) {
+        if (!d || !d.id) continue
+        const prev = map.get(d.id)
+        map.set(d.id, {
+          id: d.id,
+          name: d.name || '',
+          avatar: d.avatar || '',
+          ip: d.ip || '',
+          port: d.port || 0,
+          role: d.role || 'user',
+          firstSeen: prev ? prev.firstSeen : now,
+          lastOnline: now
+        })
+      }
+      this.contacts = [...map.values()]
+      this._persistContacts()
+    },
+    // 增量落库：把合并后的联系人全量写回本地存储
+    _persistContacts() {
+      try {
+        window.api.dbReplaceContacts(this.contacts)
       } catch {
         /* ignore */
       }
@@ -177,8 +239,12 @@ export const useStore = defineStore('app', {
       this.selectedInterface = s.selectedInterface || 'auto'
       this.groups = dbData.groups || []
       this.messages = dbData.messages || {}
+      // 载入持久化联系人（含历史离线联系人），作为左侧「联系人」列表的基底
+      this.contacts = dbData.contacts || []
       window.api.onDevices((list) => {
         this.devices = list
+        // 设备（在线）变化时，并入持久化联系人并落库，离线者保留不删
+        this._mergeContacts(list)
       })
       window.api.onChat((msg) => this.receiveChat(msg))
       window.api.onSignal((msg) => this.receiveSignal(msg))

@@ -3,48 +3,72 @@
     <div
       class="px-4 py-3 font-semibold border-b border-slate-200 flex items-center gap-2 text-slate-700 flex-none"
     >
-      在线设备
-      <span class="ml-auto text-[12px] font-normal text-slate-400">{{
-        store.devices.length
-      }}</span>
+      联系人
+      <span class="ml-auto text-[12px] font-normal text-slate-400"
+        >在线 {{ store.onlineContactCount }} / 共
+        {{ store.contactList.length }}</span
+      >
+    </div>
+
+    <div class="px-3 py-2 border-b border-slate-100 flex-none">
+      <el-input
+        v-model="search"
+        size="small"
+        clearable
+        placeholder="搜索昵称或 IP 地址"
+      />
     </div>
 
     <div class="flex-1 overflow-auto p-3 space-y-2">
       <div
-        v-for="d in store.devices"
-        :key="d.id"
-        @click="store.setActiveChat(d.id)"
+        v-for="c in filteredContacts"
+        :key="c.id"
+        @click="store.setActiveChat(c.id)"
         class="flex items-center gap-2.5 p-2.5 border rounded-xl cursor-pointer transition-colors"
         :class="
-          d.id === store.activeChatId
+          c.id === store.activeChatId
             ? 'border-blue-500 bg-blue-50'
             : 'border-slate-200 hover:bg-slate-50'
         "
       >
-        <Avatar :avatar="d.avatar" :name="d.name" :size="36" />
+        <Avatar :avatar="c.avatar" :name="c.name" :size="36" :online="c.online" />
         <div class="min-w-0">
-          <div class="font-medium text-slate-800 truncate">{{ d.name }}</div>
+          <div class="font-medium text-slate-800 truncate flex items-center gap-1.5">
+            {{ c.name }}
+            <span
+              class="w-1.5 h-1.5 rounded-full flex-none"
+              :class="c.online ? 'bg-emerald-500' : 'bg-slate-300'"
+            ></span>
+          </div>
           <div class="text-[12px] text-slate-400 truncate">
-            {{ d.ip }}:{{ d.port }}
+            {{ c.online ? c.ip + ':' + c.port : '离线' }}
           </div>
         </div>
         <span
-          v-if="d.role === 'teacher'"
+          v-if="c.role === 'teacher'"
           class="ml-1 text-[11px] text-white bg-amber-600 rounded-md px-1.5 py-0.5 flex-none"
           >老师</span
         >
         <span
-          v-if="store.unread[d.id]"
+          v-if="store.unread[c.id]"
           class="ml-auto min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-white text-[11px] grid place-items-center flex-none"
-          >{{ store.unread[d.id] }}</span
+          >{{ store.unread[c.id] }}</span
         >
       </div>
 
       <p
-        v-if="!store.devices.length"
+        v-if="store.contactList.length && !filteredContacts.length"
+        class="text-slate-400 text-[13px] px-1 py-2"
+      >
+        没有匹配「{{ search }}」的联系人。
+      </p>
+
+      <p
+        v-if="!store.contactList.length"
         class="text-slate-400 text-[13px] leading-relaxed px-1"
       >
-        正在扫描局域网…<br />确保同网段，并放行 UDP 41234（发现）/ 41235（信令）。
+        正在扫描局域网…<br />确保同网段，并放行 UDP 41234（发现）/ 41235（信令）。<br />
+        上线过的小伙伴会自动出现在这里。
       </p>
 
       <div
@@ -100,13 +124,25 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useStore } from '../store/index.js'
 import GroupModal from './GroupModal.vue'
 import Avatar from './Avatar.vue'
 
 const store = useStore()
 const showModal = ref(false)
+
+// 联系人搜索：按昵称或 IP 地址过滤（不区分大小写、子串匹配）
+const search = ref('')
+const filteredContacts = computed(() => {
+  const q = search.value.trim().toLowerCase()
+  if (!q) return store.contactList
+  return store.contactList.filter(
+    (c) =>
+      (c.name || '').toLowerCase().includes(q) ||
+      (c.ip || '').toLowerCase().includes(q)
+  )
+})
 
 function onCreate({ name, memberIds }) {
   store.createGroup(name, memberIds)

@@ -83,17 +83,17 @@
             </div>
             <div class="grid grid-cols-8 gap-2">
               <button
-                v-for="a in builtins"
+                v-for="a in avatarList"
                 :key="a.id"
                 class="rounded-full overflow-hidden border-2 transition"
                 :class="
-                  draftAvatar === 'builtin:' + a.id
+                  draftAvatar === 'asset:' + a.id
                     ? 'border-blue-500'
                     : 'border-transparent hover:border-slate-300'
                 "
-                @click="draftAvatar = 'builtin:' + a.id"
+                @click="draftAvatar = 'asset:' + a.id"
               >
-                <img :src="a.data" width="40" height="40" alt="" class="block" />
+                <img :src="a.url" width="40" height="40" alt="" class="block" />
               </button>
             </div>
             <div class="flex items-center gap-2 mt-3">
@@ -255,7 +255,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useStore } from '../store/index.js'
-import { BUILTIN_AVATARS } from '../avatars.js'
+import { avatarList, loadAvatars } from '../avatars.js'
 import { BROADCAST_QUALITY, BROADCAST_FPS } from '../webrtc.js'
 import Avatar from './Avatar.vue'
 
@@ -265,7 +265,6 @@ const store = useStore()
 // 左侧类别导航（key 与右侧面板一一对应）
 const activeTab = ref('profile')
 
-const builtins = BUILTIN_AVATARS
 const draftName = ref(store.self.name || '')
 const draftAvatar = ref(store.self.avatar || '')
 const draftInterface = ref(store.selectedInterface || 'auto')

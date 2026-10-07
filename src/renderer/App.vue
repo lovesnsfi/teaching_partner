@@ -58,6 +58,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useStore } from './store/index.js'
+import { loadAvatars } from './avatars.js'
 import DeviceList from './components/DeviceList.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import BroadcastView from './components/BroadcastView.vue'
@@ -69,6 +70,7 @@ const showSettings = ref(false)
 
 onMounted(() => {
   store.init()
+  loadAvatars()
 })
 
 function onMinimize() {

@@ -32,6 +32,7 @@
   "build": {
     "appId": "com.lan.chat.broadcast",
     "productName": "局域网沟通广播",
+    "icon": "assets/ico/app.ico",
     "directories": {
       "output": "dist"
     },

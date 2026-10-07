@@ -7,10 +7,13 @@ const api = {
   setAvatar: (avatar) => ipcRenderer.invoke('self:setAvatar', avatar),
   // 获取新消息提示音（base64 data URI），renderer 端用于播放
   getSound: () => ipcRenderer.invoke('get:sound'),
+  // 获取打包内置头像列表 [{ id, url }]，url 为 base64 data URI
+  getAvatars: () => ipcRenderer.invoke('get:avatars'),
   // 本地持久化（SQLite / JSON 文件，由主进程选择后端）
   dbLoad: () => ipcRenderer.invoke('db:load'),
   dbSaveSettings: (obj) => ipcRenderer.invoke('db:saveSettings', obj),
   dbReplaceGroups: (groups) => ipcRenderer.invoke('db:replaceGroups', groups),
+  dbReplaceContacts: (list) => ipcRenderer.invoke('db:replaceContacts', list),
   dbAppendMessage: (m) => ipcRenderer.invoke('db:appendMessage', m),
   dbUpdateMessage: (p) => ipcRenderer.invoke('db:updateMessage', p),
   // 网卡列表与切换（用于选择局域网）
