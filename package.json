@@ -61,7 +61,7 @@
         "provider": "github",
         "owner": "lovesnsfi",
         "repo": "teaching_partner",
-        "draft": false
+        "releaseType": "release"
       }
     ]
   }
