@@ -9,6 +9,11 @@ autoUpdater.autoInstallOnAppQuit = true
 // 主窗口引用由 main.js 通过 getter 注入，便于窗口被重建（托盘恢复）后仍能推送事件
 let winGetter = () => null
 
+// 本次检查是否由用户手动触发。
+// 自动检查（启动后延迟执行）失败通常是因为纯内网无外网、GitHub 限流等，
+// 这类失败不应打扰用户，只写控制台；手动点「检查更新」时才弹窗告知原因。
+let manualCheck = false
+
 // 把更新事件统一通过该 channel 发送到渲染层，payload = { channel, data }
 function send(channel, data) {
   const w = winGetter()
@@ -65,7 +70,13 @@ export function setupAutoUpdater(getter) {
   })
 
   autoUpdater.on('error', (e) => {
-    send('error', { message: (e && e.message) || String(e) })
+    const message = (e && e.message) || String(e)
+    if (!manualCheck) {
+      // 自动检查失败：静默处理，不弹窗（内网无外网等属正常情况）
+      console.warn('[updater] 自动检查更新失败（已忽略）:', message)
+      return
+    }
+    send('error', { message })
   })
 
   // ---- 渲染层主动触发的 IPC ----
@@ -75,12 +86,18 @@ export function setupAutoUpdater(getter) {
       send('dev-skip', {})
       return { skipped: true }
     }
+    manualCheck = true
     try {
       await autoUpdater.checkForUpdates()
       return { ok: true }
     } catch (e) {
-      send('error', { message: (e && e.message) || String(e) })
+      // 失败信息已由上面的 error 事件统一上报，这里只把结果回给调用方，避免重复弹窗
       return { error: (e && e.message) || String(e) }
+    } finally {
+      // 事件在 await 期间同步抛出，稍后再复位，确保 error 处理器读到 manualCheck=true
+      setTimeout(() => {
+        manualCheck = false
+      }, 0)
     }
   })
 

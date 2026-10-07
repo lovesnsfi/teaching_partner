@@ -51,8 +51,21 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 // 关闭该遮挡优化，使被遮挡的窗口仍可正常采集。
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
-// 文件接收状态：fileId -> { stream, tmp, received, total, convId, groupId, fromName, name, size, mime }
+// ===== 文件传输状态 =====
+// 接收中：fileId -> { stream, tmp, destPath, received, total, convId, groupId, fromName, name, size, mime }
 const fileRecv = new Map()
+// 发送端：已发出「传输请求」、等待对方确认的文件 fileId -> spec
+//   spec = { fileId, ips, file, convId, groupId, granted:Set<ip>, rejectedCount }
+const pendingOut = new Map()
+// 接收端：收到的「传输请求」（等待本端确认接收）fileId -> info
+const pendingIn = new Map()
+// 接收端：用户在「另存为」中预先选定的落盘路径 fileId -> absolutePath
+const preRecvDest = new Map()
+// 发送进度累计：fileId -> { perIp, granted, done }
+const sendState = new Map()
+
+// ===== 学生端「屏幕广播」独立观看窗口 =====
+let broadcastWin = null
 
 // 定位打包内置头像目录：dev 在 app.getAppPath()/assets/avatar，
 // 打包后由 extraResources 放在 resources/assets/avatar。
@@ -114,6 +127,66 @@ function showWindow() {
   win.focus()
 }
 
+// 学生端「屏幕广播」独立观看窗口。
+// 主窗口只做控制（谁在播、加入 / 离开），老师画面在这里单独开一个大窗展示，
+// 避免挤在右侧小面板里细节看不清。
+// 注意：学生端的 WebRTC 握手（offer / ice / bye）都路由到这个窗口处理。
+function createBroadcastWindow(info = {}) {
+  if (broadcastWin && !broadcastWin.isDestroyed()) {
+    broadcastWin.show()
+    broadcastWin.focus()
+    return broadcastWin
+  }
+  broadcastWin = new BrowserWindow({
+    width: 1280,
+    height: 740,
+    minWidth: 640,
+    minHeight: 420,
+    title: info.name ? `${info.name} 的屏幕广播` : '屏幕广播',
+    icon: trayIcon,
+    backgroundColor: '#000000',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: join(__dirname, '../preload/preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+  // 通过 query 把老师信息带进渲染层，供窗口自行完成「请求推流 → 收流」的握手
+  const query = {
+    broadcast: '1',
+    tid: info.id || '',
+    tip: info.ip || '',
+    tname: info.name || ''
+  }
+  if (RENDERER_DEV_URL) {
+    const url = new URL(RENDERER_DEV_URL)
+    for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v)
+    broadcastWin.loadURL(url.toString())
+  } else {
+    broadcastWin.loadFile(join(DIST, 'index.html'), { query })
+  }
+  broadcastWin.on('closed', () => {
+    broadcastWin = null
+    // 通知主窗口复位学生端广播状态（手动关窗 / 老师停播都会走到这里）
+    if (win) win.webContents.send('lan:broadcast-closed')
+  })
+  return broadcastWin
+}
+
+function closeBroadcastWindow() {
+  const w = broadcastWin
+  broadcastWin = null
+  if (w && !w.isDestroyed()) {
+    try {
+      w.close()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 function selfInfo() {
   return {
     id: SELF_ID,
@@ -137,15 +210,92 @@ function uniqueName(dir, name) {
   return candidate
 }
 
-// 接收端：处理文件分片，边收边写临时文件，收齐后落盘到下载目录
+// 接收端：处理文件相关消息。
+// 与旧实现的关键差异：对端先发 offer（仅元信息），本端弹「接收 / 另存为」，
+// 用户确认后回 accept，对端才开始分片传输 —— 避免未经同意就被灌文件。
 function handleFileMessage(msg) {
+  const fromIp = msg._from
+
+  // 会话 id 归一化：本端 messages 以「对端设备 id」（单聊）或 groupId（群聊）为键。
+  // 对端发来的 convId 是「对端的会话键」——单聊时它等于本端设备 id，若直接使用会把
+  // 文件卡片写进本端自己的会话桶，对方界面上什么都看不到。这里统一改正：
+  //   群聊 -> groupId；单聊 -> 发送方设备 id（msg.from），兜底用来源 IP。
+  if (msg.groupId) {
+    msg.convId = msg.groupId
+  } else if (msg.from) {
+    msg.convId = msg.from
+  }
+
+  // 1) 传输请求：登记待确认状态，交给渲染层询问用户
+  if (msg.action === 'offer') {
+    pendingIn.set(msg.fileId, {
+      fileId: msg.fileId,
+      convId: msg.convId,
+      groupId: msg.groupId || null,
+      name: msg.name,
+      size: msg.size,
+      mime: msg.mime,
+      total: msg.total || 0,
+      fromIp,
+      from: msg.from,
+      fromName: msg.fromName || '对方'
+    })
+    if (win) {
+      win.webContents.send('lan:file-offer', {
+        fileId: msg.fileId,
+        name: msg.name,
+        size: msg.size,
+        mime: msg.mime,
+        total: msg.total || 0,
+        convId: msg.convId,
+        groupId: msg.groupId || null,
+        from: msg.from,
+        fromName: msg.fromName || '对方',
+        fromAvatar: msg.fromAvatar || '',
+        awaiting: true
+      })
+    }
+    return
+  }
+
+  // 2) 对方同意接收：开始真正的分片传输
+  if (msg.action === 'accept') {
+    startFileTransfer(msg.fileId, fromIp)
+    return
+  }
+
+  // 3) 对方拒绝接收
+  if (msg.action === 'reject') {
+    const spec = pendingOut.get(msg.fileId)
+    if (!spec) return
+    spec.rejectedCount = (spec.rejectedCount || 0) + 1
+    // 所有目标都拒绝且无人同意 → 通知发送方「对方已拒绝」
+    if (spec.granted.size === 0 && spec.rejectedCount >= spec.ips.length) {
+      pendingOut.delete(msg.fileId)
+      sendState.delete(msg.fileId)
+      if (win) {
+        win.webContents.send('lan:file-rejected', {
+          fileId: msg.fileId,
+          convId: spec.convId,
+          groupId: spec.groupId
+        })
+      }
+    }
+    return
+  }
+
   if (msg.action !== 'chunk') return
+
   let rec = fileRecv.get(msg.fileId)
   if (!rec) {
+    // 「另存为」时用户已选定目标路径，直接写入该路径；
+    // 否则先写临时文件，全部收齐后再挪到「下载/局域网沟通广播」目录。
+    const destPath = preRecvDest.get(msg.fileId) || null
     const tmp = join(app.getPath('temp'), `lanfile-${msg.fileId}.part`)
     rec = {
-      stream: createWriteStream(tmp),
+      stream: createWriteStream(destPath || tmp),
       tmp,
+      destPath,
       received: 0,
       total: msg.total || 1,
       convId: msg.convId,
@@ -156,18 +306,7 @@ function handleFileMessage(msg) {
       mime: msg.mime
     }
     fileRecv.set(msg.fileId, rec)
-    if (win) {
-      win.webContents.send('lan:file-offer', {
-        fileId: msg.fileId,
-        name: msg.name,
-        size: msg.size,
-        mime: msg.mime,
-        convId: msg.convId,
-        groupId: msg.groupId,
-        fromName: rec.fromName,
-        fromAvatar: msg.fromAvatar || ''
-      })
-    }
+    preRecvDest.delete(msg.fileId)
   }
   rec.stream.write(Buffer.from(msg.data, 'base64'))
   rec.received++
@@ -180,19 +319,22 @@ function handleFileMessage(msg) {
   }
   if (rec.received >= rec.total) {
     rec.stream.end(() => {
-      const dir = join(app.getPath('downloads'), '局域网沟通广播')
-      mkdirSync(dir, { recursive: true })
-      const finalPath = uniqueName(dir, msg.name)
-      try {
-        renameSync(rec.tmp, finalPath)
-      } catch {
-        /* 跨盘符 rename 失败兜底：直接读临时文件复制 */
+      let finalPath = rec.destPath
+      if (!finalPath) {
+        const dir = join(app.getPath('downloads'), '局域网沟通广播')
+        mkdirSync(dir, { recursive: true })
+        finalPath = uniqueName(dir, msg.name)
         try {
-          const buf = readFileSync(rec.tmp)
-          writeFileSync(finalPath, buf)
-          unlinkSync(rec.tmp)
+          renameSync(rec.tmp, finalPath)
         } catch {
-          /* ignore */
+          /* 跨盘符 rename 失败兜底：直接读临时文件复制 */
+          try {
+            const buf = readFileSync(rec.tmp)
+            writeFileSync(finalPath, buf)
+            unlinkSync(rec.tmp)
+          } catch {
+            /* ignore */
+          }
         }
       }
       fileRecv.delete(msg.fileId)
@@ -204,6 +346,7 @@ function handleFileMessage(msg) {
           path: finalPath,
           convId: msg.convId,
           groupId: msg.groupId,
+          from: msg.from,
           fromName: rec.fromName,
           ts: Date.now()
         })
@@ -212,13 +355,71 @@ function handleFileMessage(msg) {
   }
 }
 
-// 发送端：读文件 -> base64 分片 -> 逐个目标 IP 发送（同连接内连续发送）
-async function sendFileToIps(ips, file, fileId, convId, groupId, onProgress) {
+// 发送端：把待发文件登记为「待确认」，并给每个目标发一条只含元信息的传输请求。
+// 真正的数据要等对方回 accept（见 startFileTransfer）才发送。
+function queueFileSend(spec) {
+  const perIp = Math.max(1, Math.ceil((spec.file.size || 0) / CHUNK_SIZE))
+  pendingOut.set(spec.fileId, {
+    fileId: spec.fileId,
+    ips: spec.ips,
+    file: spec.file,
+    convId: spec.convId,
+    groupId: spec.groupId || null,
+    granted: new Set(),
+    rejectedCount: 0
+  })
+  sendState.set(spec.fileId, { perIp, granted: 0, done: 0 })
+  for (const ip of spec.ips) {
+    signaling.send(ip, {
+      type: 'file',
+      action: 'offer',
+      fileId: spec.fileId,
+      convId: spec.convId,
+      groupId: spec.groupId || null,
+      name: spec.file.name,
+      size: spec.file.size,
+      mime: spec.file.mime,
+      total: perIp,
+      from: SELF_ID,
+      fromName: myName,
+      fromAvatar: myAvatar
+    })
+  }
+}
+
+// 收到对端 accept 后：为该目标启动传输（群发场景下各自确认、各自启动）
+async function startFileTransfer(fileId, ip) {
+  const spec = pendingOut.get(fileId)
+  if (!spec || !ip) return
+  if (spec.granted.has(ip)) return
+  spec.granted.add(ip)
+  const st = sendState.get(fileId)
+  if (st) st.granted = spec.granted.size
+  // 首个目标确认时通知渲染层：文件从「等待对方接收」转为「发送中」
+  if (spec.granted.size === 1 && win) {
+    win.webContents.send('lan:file-send-start', {
+      fileId,
+      convId: spec.convId,
+      groupId: spec.groupId,
+      name: spec.file.name,
+      size: spec.file.size
+    })
+  }
+  await sendFileToIps([ip], spec.file, fileId, spec.convId, spec.groupId)
+  if (spec.granted.size >= spec.ips.length) {
+    pendingOut.delete(fileId)
+    sendState.delete(fileId)
+    if (win) win.webContents.send('lan:file-send-done', { fileId, convId: spec.convId })
+  }
+}
+
+// 发送端底层：读文件 -> base64 分片 -> 逐个目标 IP 发送（同连接内连续发送）
+async function sendFileToIps(ips, file, fileId, convId, groupId) {
   let buf
   try {
     buf = readFileSync(file.path)
   } catch {
-    return
+    return false
   }
   const total = Math.max(1, Math.ceil(buf.length / CHUNK_SIZE))
   const mk = (i) => ({
@@ -239,23 +440,22 @@ async function sendFileToIps(ips, file, fileId, convId, groupId, onProgress) {
   })
   const payloads = []
   for (let i = 0; i < total; i++) payloads.push(mk(i))
-  const grand = total * ips.length
-  let done = 0
-  if (win) {
-    win.webContents.send('lan:file-send-start', {
-      fileId,
-      convId,
-      groupId,
-      name: file.name,
-      size: file.size
-    })
-  }
   for (const ip of ips) {
     await signaling.sendChunks(ip, payloads, () => {
-      done++
-      if (onProgress) onProgress(fileId, done, grand)
+      const st = sendState.get(fileId)
+      if (!st) return
+      st.done++
+      if (win) {
+        win.webContents.send('lan:file-send-progress', {
+          fileId,
+          done: st.done,
+          // 分母随「已确认接收」的目标数动态增长，保证最终能到 100%
+          total: Math.max(1, st.perIp * Math.max(1, st.granted))
+        })
+      }
     })
   }
+  // 通知接收端：本次传输的分片已全部发出
   for (const ip of ips) {
     signaling.send(ip, {
       type: 'file',
@@ -266,7 +466,7 @@ async function sendFileToIps(ips, file, fileId, convId, groupId, onProgress) {
       name: file.name
     })
   }
-  if (win) win.webContents.send('lan:file-send-done', { fileId, convId })
+  return true
 }
 
 app.whenReady().then(async () => {
@@ -319,11 +519,28 @@ app.whenReady().then(async () => {
   // 2) 聊天 + 信令服务
   signaling = new Signaling(self)
   signaling.on('message', (msg) => {
+    if (msg.type === 'file') {
+      // 文件消息与窗口是否存在无关，先处理以免主窗口隐藏时丢包
+      handleFileMessage(msg)
+      return
+    }
+    if (msg.type === 'signal') {
+      const kind = msg.payload && msg.payload.kind
+      // 学生端的 WebRTC 握手（offer / ice / bye）交给独立观看窗口处理
+      if (
+        broadcastWin &&
+        !broadcastWin.isDestroyed() &&
+        ['offer', 'ice', 'bye'].includes(kind)
+      ) {
+        broadcastWin.webContents.send('lan:signal', msg)
+      } else if (win) {
+        win.webContents.send('lan:signal', msg)
+      }
+      return
+    }
     if (!win) return
     if (msg.type === 'chat') win.webContents.send('lan:chat', msg)
-    else if (msg.type === 'signal') win.webContents.send('lan:signal', msg)
     else if (msg.type === 'group') win.webContents.send('lan:group', msg)
-    else if (msg.type === 'file') handleFileMessage(msg)
   })
   signaling.on('error', (err) => console.error('[signal] error', err))
 
@@ -477,6 +694,16 @@ app.whenReady().then(async () => {
     }
   })
 
+  // 供 renderer 主动拉取当前已发现的设备列表（消除「初始发现事件早于
+  // onDevices 监听器注册」导致联系人漏存/漏标在线的问题）
+  ipcMain.handle('discovery:list', () => {
+    try {
+      return discovery ? discovery.list() : []
+    } catch {
+      return []
+    }
+  })
+
   // 列出网卡 + 当前选择（设置界面用）
   ipcMain.handle('get:interfaces', () => ({
     list: listInterfaces(),
@@ -525,19 +752,50 @@ app.whenReady().then(async () => {
     }
   })
 
-  // 发送文件（main 负责分片）
+  // 发送文件：此处只发出「传输请求」，等对方确认接收后才真正分片发送
   ipcMain.on('send:file', (_, spec) => {
     if (!signaling || !spec || !spec.ips || !spec.ips.length || !spec.file) return
-    sendFileToIps(
-      spec.ips,
-      spec.file,
-      spec.fileId,
-      spec.convId,
-      spec.groupId || null,
-      (fileId, done, total) => {
-        if (win) win.webContents.send('lan:file-send-progress', { fileId, done, total })
-      }
-    )
+    queueFileSend(spec)
+  })
+
+  // 接收方确认接收（saveAs=true 时先弹出「另存为」选择落盘位置）
+  ipcMain.handle('file:accept', async (_, { fileId, saveAs } = {}) => {
+    const info = pendingIn.get(fileId)
+    if (!info) return { ok: false }
+    if (saveAs) {
+      const res = await dialog.showSaveDialog(win, {
+        title: '另存为',
+        defaultPath: info.name || 'download'
+      })
+      if (res.canceled || !res.filePath) return { ok: false, canceled: true }
+      preRecvDest.set(fileId, res.filePath)
+    }
+    pendingIn.delete(fileId)
+    if (signaling && info.fromIp) {
+      signaling.send(info.fromIp, { type: 'file', action: 'accept', fileId })
+    }
+    return { ok: true }
+  })
+
+  // 接收方拒绝接收
+  ipcMain.handle('file:reject', (_, { fileId } = {}) => {
+    const info = pendingIn.get(fileId)
+    if (info && signaling && info.fromIp) {
+      signaling.send(info.fromIp, { type: 'file', action: 'reject', fileId })
+    }
+    pendingIn.delete(fileId)
+    preRecvDest.delete(fileId)
+    return { ok: true }
+  })
+
+  // 学生端屏幕广播：独立观看窗口的打开 / 关闭
+  ipcMain.handle('broadcast:open', (_, info) => {
+    createBroadcastWindow(info || {})
+    return true
+  })
+  ipcMain.handle('broadcast:close', () => {
+    closeBroadcastWindow()
+    return true
   })
 
   // 选择文件（返回本地 path 与元数据）

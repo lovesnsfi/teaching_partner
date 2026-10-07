@@ -1,6 +1,6 @@
 {
   "name": "lan-chat-broadcast",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "局域网沟通与屏幕广播软件（Electron + Vue3，方案A WebRTC Mesh，无中心服务器）",
   "main": "out/main/main.js",
@@ -60,7 +60,8 @@
       {
         "provider": "github",
         "owner": "lovesnsfi",
-        "repo": "teaching_partner"
+        "repo": "teaching_partner",
+        "draft": false
       }
     ]
   }

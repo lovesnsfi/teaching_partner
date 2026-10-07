@@ -1,14 +1,10 @@
 import { defineStore } from 'pinia'
-import {
-  TeacherBroadcaster,
-  StudentReceiver,
-  captureScreen,
-  getQualityProfile
-} from '../webrtc.js'
+import { TeacherBroadcaster, captureScreen, getQualityProfile } from '../webrtc.js'
 
-// WebRTC 实例放模块级，避免被 Vue 响应式代理导致异常
+// WebRTC 实例放模块级，避免被 Vue 响应式代理导致异常。
+// 说明：学生端的接收器不在这里 —— 它运行在独立的「屏幕广播」观看窗口
+// （见 components/BroadcastWindow.vue），主窗口只负责控制与状态展示。
 let broadcaster = null
-let receiver = null
 
 function makeSendSignal() {
   return (ip, payload) => window.api.sendSignal(ip, payload)
@@ -193,6 +189,18 @@ export const useStore = defineStore('app', {
         this.unread[convId] = (this.unread[convId] || 0) + 1
       }
     },
+    // 按 fileId 找到对应的文件消息卡片并打补丁（发送方 / 接收方通用）
+    _patchFileMsg(fileId, patch) {
+      if (!fileId) return
+      for (const convId of Object.keys(this.messages)) {
+        const msg = (this.messages[convId] || []).find((x) => x.fileId === fileId)
+        if (msg) {
+          Object.assign(msg, patch)
+          return msg
+        }
+      }
+      return null
+    },
     async init() {
       if (this.status !== 'init') return
       // 从本地持久化（SQLite 或 JSON 文件）载入设置/群/消息
@@ -246,6 +254,17 @@ export const useStore = defineStore('app', {
         // 设备（在线）变化时，并入持久化联系人并落库，离线者保留不删
         this._mergeContacts(list)
       })
+      // 主动拉取一次当前已发现设备并合并：消除「初始发现事件早于
+      // onDevices 监听器注册」导致联系人漏存、在线状态漏标的时序问题
+      try {
+        const initial = await window.api.getDeviceList()
+        if (Array.isArray(initial) && initial.length) {
+          this.devices = initial
+          this._mergeContacts(initial)
+        }
+      } catch {
+        /* ignore */
+      }
       window.api.onChat((msg) => this.receiveChat(msg))
       window.api.onSignal((msg) => this.receiveSignal(msg))
       window.api.onGroup((msg) => this.receiveGroup(msg))
@@ -257,8 +276,11 @@ export const useStore = defineStore('app', {
           done: 0,
           total: 0,
           name: m.name,
-          sending: true
+          sending: true,
+          waiting: false
         }
+        // 对方已确认接收 → 卡片从「等待对方接收」切到「发送中」
+        this._patchFileMsg(m.fileId, { waiting: false, sending: true })
       })
       window.api.onFileSendProgress((m) => {
         if (this.fileSend[m.fileId]) {
@@ -269,11 +291,18 @@ export const useStore = defineStore('app', {
       window.api.onFileSendDone((m) => {
         if (this.fileSend[m.fileId]) this.fileSend[m.fileId].sending = false
         // 把对应本地消息标记为完成
-        const arr = this.messages[m.convId]
-        if (arr) {
-          const msg = arr.find((x) => x.fileId === m.fileId && x.mine)
-          if (msg) msg.sending = false
-        }
+        this._patchFileMsg(m.fileId, { waiting: false, sending: false })
+      })
+      // 对方拒绝接收本端发出的文件
+      window.api.onFileRejected((m) => {
+        if (this.fileSend[m.fileId]) this.fileSend[m.fileId].sending = false
+        this._patchFileMsg(m.fileId, { waiting: false, sending: false, rejected: true })
+      })
+      // 独立观看窗口被关闭（手动关闭 / 老师停播）→ 复位学生端状态
+      window.api.onBroadcastClosed(() => {
+        this.broadcast.role = null
+        this.broadcast.teacherStream = null
+        this.broadcast.teacherInfo = null
       })
       this.status = 'ready'
       // 加载提示音（base64 data URI），用于新消息播放
@@ -322,6 +351,14 @@ export const useStore = defineStore('app', {
     setActiveChat(id) {
       this.activeChatId = id
       this.unread[id] = 0
+    },
+    // 手动删除一个联系人（仅允许删除离线联系人，见 DeviceList 右键菜单约束）。
+    // 删除后落库；若该联系人之后再次上线，_mergeContacts 会重新并入，属预期行为。
+    deleteContact(id) {
+      if (!id) return
+      this.contacts = (this.contacts || []).filter((c) => c.id !== id)
+      if (this.activeChatId === id) this.activeChatId = null
+      this._persistContacts()
     },
     // 取群内成员当前在线 IP（排除自己）
     _memberIps(group) {
@@ -377,7 +414,8 @@ export const useStore = defineStore('app', {
       if (!code) return
       this._dispatch('sticker', { sticker: code })
     },
-    // 选择文件并发送（群则群发）
+    // 选择文件并发送（群则群发）。
+    // 注意：这里只发出「传输请求」，对方点「接收 / 另存为」后主进程才开始传数据。
     async sendFileFromPicker() {
       const id = this.activeChatId
       if (!id) return
@@ -395,7 +433,13 @@ export const useStore = defineStore('app', {
       const fileId =
         (window.crypto && window.crypto.randomUUID && window.crypto.randomUUID()) ||
         'f-' + Date.now()
-      this.fileSend[fileId] = { done: 0, total: 0, name: file.name, sending: true }
+      this.fileSend[fileId] = {
+        done: 0,
+        total: 0,
+        name: file.name,
+        sending: false,
+        waiting: true
+      }
       window.api.sendFile({
         fileId,
         ips,
@@ -411,7 +455,8 @@ export const useStore = defineStore('app', {
         kind: 'file',
         fileId,
         file: { name: file.name, size: file.size, mime: file.mime, path: file.path },
-        sending: true
+        waiting: true,
+        sending: false
       })
     },
     receiveChat(msg) {
@@ -509,17 +554,19 @@ export const useStore = defineStore('app', {
       if (this.activeChatId === groupId) this.activeChatId = null
       this._persistGroups()
     },
-    // 文件接收事件
+    // 收到对端的文件传输请求：先展示卡片，等用户点「接收 / 另存为」才开始接收
     receiveFileOffer(m) {
       this.fileRecv[m.fileId] = {
         received: 0,
         total: m.total || 0,
         name: m.name
       }
-      const convId = m.convId || m.groupId
+      // 会话键：群聊用 groupId；单聊用「发送方设备 id」（不能直接用对端传来的 convId，
+      // 那是「对端的会话键」，单聊时等于本端 id，会落到本端自己的会话桶里）
+      const convId = m.groupId || m.from || m.convId
       if (!convId) return
       this._appendMsg(convId, {
-        from: '?',
+        from: m.from || '?',
         fromName: m.fromName || '对方',
         fromAvatar: m.fromAvatar || '',
         ts: Date.now(),
@@ -527,26 +574,47 @@ export const useStore = defineStore('app', {
         kind: 'file',
         fileId: m.fileId,
         file: { name: m.name, size: m.size, mime: m.mime },
-        receiving: true
+        awaiting: true, // 等待本端确认接收
+        receiving: false
       })
       this._bumpUnread(convId)
       this.playNotify()
     },
     receiveFileProgress(m) {
-      if (this.fileRecv[m.fileId]) this.fileRecv[m.fileId].received = m.received
+      const f = this.fileRecv[m.fileId]
+      if (f) {
+        f.received = m.received
+        if (m.total) f.total = m.total
+      }
     },
     receiveFileDone(m) {
-      const convId = m.convId || m.groupId
+      const convId = m.groupId || m.from || m.convId
       const arr = this.messages[convId]
       if (arr) {
         const msg = arr.find((x) => x.fileId === m.fileId)
         if (msg) {
           msg.file = { name: m.name, size: m.size, mime: m.mime, path: m.path }
           msg.receiving = false
+          msg.awaiting = false
+          msg.rejected = false
         }
       }
       if (this.fileRecv[m.fileId]) this.fileRecv[m.fileId].done = true
       this._updateMsg(convId, m.fileId, { name: m.name, size: m.size, mime: m.mime, path: m.path }, false)
+    },
+    // 接收方同意接收。saveAs=true 时先弹出「另存为」对话框选择保存位置，
+    // 用户取消则不发送 accept（对方仍处于「等待接收」状态）。
+    async acceptFile(fileId, saveAs = false) {
+      const r = await window.api.acceptFile({ fileId, saveAs: !!saveAs })
+      if (!r || !r.ok) return false
+      this._patchFileMsg(fileId, { awaiting: false, receiving: true, rejected: false })
+      return true
+    },
+    // 接收方拒绝接收：通知对方，并把卡片标记为「已拒绝」
+    rejectFile(fileId) {
+      window.api.rejectFile({ fileId })
+      this._patchFileMsg(fileId, { awaiting: false, receiving: false, rejected: true })
+      delete this.fileRecv[fileId]
     },
     loadSources() {
       return window.api.getSources().then((s) => {
@@ -557,14 +625,6 @@ export const useStore = defineStore('app', {
     getBroadcaster() {
       if (!broadcaster) broadcaster = new TeacherBroadcaster(makeSendSignal())
       return broadcaster
-    },
-    getReceiver() {
-      if (!receiver) {
-        receiver = new StudentReceiver(makeSendSignal(), (stream) => {
-          this.broadcast.teacherStream = stream
-        })
-      }
-      return receiver
     },
     // 监听采集轨道结束：目标窗口被关闭 / 权限失效时 WGC 会结束该轨道，
     // 这里兜底自动停播，避免残留 capture session 反复抛 ProcessFrame failed。
@@ -638,17 +698,31 @@ export const useStore = defineStore('app', {
       this.broadcast.role = null
       broadcaster = null
     },
+    // 加入老师的广播：画面单独开一个独立窗口播放（不在主窗口右侧挤小画面）。
+    // 完整的 WebRTC 握手（request → offer → answer → ice）由该窗口自行完成。
     joinBroadcast(teacher) {
       this.broadcast.role = 'student'
       this.broadcast.teacherInfo = teacher
       this.broadcast.invitingTeachers = this.broadcast.invitingTeachers.filter(
         (t) => t.id !== teacher.id
       )
-      window.api.sendSignal(teacher.ip, { kind: 'request' })
+      if (window.api.openBroadcastWindow) {
+        window.api.openBroadcastWindow({
+          id: teacher.id,
+          name: teacher.name,
+          ip: teacher.ip
+        })
+      }
+    },
+    // 重新打开（用户手动关掉观看窗口后想再看）
+    reopenBroadcastWindow() {
+      const t = this.broadcast.teacherInfo
+      if (t && window.api.openBroadcastWindow) {
+        window.api.openBroadcastWindow({ id: t.id, name: t.name, ip: t.ip })
+      }
     },
     leaveBroadcast() {
-      if (receiver) receiver.stop()
-      receiver = null
+      if (window.api.closeBroadcastWindow) window.api.closeBroadcastWindow()
       this.broadcast.role = null
       this.broadcast.teacherStream = null
       this.broadcast.teacherInfo = null
@@ -672,9 +746,8 @@ export const useStore = defineStore('app', {
           }
           break
         case 'offer':
-          if (this.broadcast.role === 'student') {
-            this.getReceiver().handleOffer(from, _from, payload.sdp)
-          }
+          // 学生端的 offer / ice 已在主进程被路由到独立观看窗口
+          // （components/BroadcastWindow.vue），主窗口只处理老师端逻辑。
           break
         case 'answer':
           if (this.broadcast.role === 'teacher') {
@@ -684,8 +757,6 @@ export const useStore = defineStore('app', {
         case 'ice':
           if (this.broadcast.role === 'teacher') {
             this.getBroadcaster().handleIce(from, payload.candidate)
-          } else if (this.broadcast.role === 'student') {
-            this.getReceiver().handleIce(payload.candidate)
           }
           break
         case 'bye':
