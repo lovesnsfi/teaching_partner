@@ -45,6 +45,7 @@ export const useStore = defineStore('app', {
       sources: [],
       broadcastQuality: 'hd', // 屏幕广播画质：sd 标清 | hd 高清 | origin 原画
       broadcastFps: 30, // 屏幕广播帧率：15 | 30 | 60
+      lastShot: null, // 最近一次框选截屏生成的图片文件（已在剪贴板中）
       status: 'init'
     }
   },
@@ -411,6 +412,7 @@ export const useStore = defineStore('app', {
       window.api.onSignal((msg) => this.receiveSignal(msg))
       window.api.onGroup((msg) => this.receiveGroup(msg))
       window.api.onFileOffer((m) => this.receiveFileOffer(m))
+      window.api.onFileIncoming((m) => this.receiveFileIncoming(m))
       window.api.onFileProgress((m) => this.receiveFileProgress(m))
       window.api.onFileDone((m) => this.receiveFileDone(m))
       window.api.onFileSendStart((m) => {
@@ -440,6 +442,10 @@ export const useStore = defineStore('app', {
         if (this.fileSend[m.fileId]) this.fileSend[m.fileId].sending = false
         this._patchFileMsg(m.fileId, { waiting: false, sending: false, rejected: true })
       })
+      // 对方在接收途中主动取消，发送方需停止剩余分片
+      window.api.onFileCancelled((m) => this.receiveFileCancelled(m))
+      // 框选截屏完成（结果由主进程从独立的框选层窗口回传）
+      window.api.onShotResult((m) => this.handleShotResult(m))
       // 独立观看窗口被关闭。
       // 关键：只有「老师停播 / 主动离开」才退出学生身份；
       // 学生自己关掉观看窗口时保留 role / teacherInfo，右栏继续显示该老师，
@@ -574,13 +580,88 @@ export const useStore = defineStore('app', {
       if (!code) return
       this._dispatch('sticker', { sticker: code })
     },
-    // 选择文件并发送（群则群发）。
-    // 注意：这里只发出「传输请求」，对方点「接收 / 另存为」后主进程才开始传数据。
+    // 选择图片并发送。
+    // 传输仍走文件通道（分片 + 对方确认 + 进度），但消息带 image/* 的 mime，
+    // 渲染层据此内联显示为图片而不是文件卡片。
+    async sendImageFromPicker() {
+      const id = this.activeChatId
+      if (!id) return
+      const file = await window.api.pickImage()
+      if (!file) return
+      this._sendFileToConversation(id, file)
+    },
+
     async sendFileFromPicker() {
       const id = this.activeChatId
       if (!id) return
       const file = await window.api.pickFile()
       if (!file) return
+      this._sendFileToConversation(id, file)
+    },
+
+    // 框选截屏：主进程隐藏主窗口抓底图 → 全屏框选层 → 裁剪后写入剪贴板。
+    // 按需求**不自动发送**，用户自行粘贴到聊天框。
+    async beginScreenshot() {
+      const r = await window.api.beginScreenshot()
+      if (!r || !r.ok) {
+        return { ok: false, reason: (r && r.reason) || '截屏失败' }
+      }
+      return { ok: true }
+    },
+
+    // 最近一次框选截屏产生的图片文件（已放入剪贴板），供「顺便发送」等功能取用
+    handleShotResult(m) {
+      if (m && m.ok && m.file) this.lastShot = m.file
+    },
+
+    // 发送一个已就绪的图片文件（如 Ctrl+V 粘贴截图得到的临时文件）
+    sendImageFile(file) {
+      const id = this.activeChatId
+      if (!id || !file) return
+      this._sendFileToConversation(id, file)
+    },
+
+    // 接收过程中主动取消：停止接收，删除半截文件，并通知发送方停发
+    async cancelReceive(fileId) {
+      if (!fileId) return false
+      const r = await window.api.cancelReceive(fileId)
+      if (!r || !r.ok) return false
+      this._patchFileMsg(fileId, { receiving: false, awaiting: false, cancelled: true })
+      delete this.fileRecv[fileId]
+      return true
+    },
+
+    // 对方在传输途中取消接收
+    receiveFileCancelled(m) {
+      if (!m || !m.fileId) return
+      if (this.fileSend[m.fileId]) this.fileSend[m.fileId].sending = false
+      this._patchFileMsg(m.fileId, { sending: false, waiting: false, cancelled: true })
+    },
+
+    // 转发图片给选中的联系人 / 群（可多选，每人各发一份）
+    forwardImage(file, ids) {
+      const list = Array.isArray(ids) ? ids : [ids]
+      if (!file || !list.length) return 0
+      let n = 0
+      for (const id of list) {
+        if (id.startsWith('group:')) {
+          const g = this.groups.find((x) => x.id === id)
+          const ips = this._memberIps(g)
+          if (!ips.length) continue
+          this._dispatchFile(id, id, ips, file, true)
+          n++
+        } else {
+          const dev = this.devices.find((d) => d.id === id)
+          if (!dev || !dev.ip) continue
+          this._dispatchFile(id, null, [dev.ip], file, true)
+          n++
+        }
+      }
+      return n
+    },
+
+    // 把一个已选中的文件/图片发给当前会话（群则群发）
+    _sendFileToConversation(id, file) {
       const isGroup = id.startsWith('group:')
       const group = isGroup ? this.groups.find((g) => g.id === id) : null
       const ips = isGroup
@@ -589,25 +670,34 @@ export const useStore = defineStore('app', {
             const d = this.devices.find((x) => x.id === id)
             return d ? [d.ip] : []
           })()
-      if (!ips.length) return
+      this._dispatchFile(id, isGroup ? id : null, ips, file)
+    },
+
+    // 真正发起一次文件/图片传输（正常发送与转发共用）
+    // forwarded=true 时消息上标注「转发的图片」
+    _dispatchFile(convId, groupId, ips, file, forwarded = false) {
+      if (!ips || !ips.length || !file) return
       const fileId =
         (window.crypto && window.crypto.randomUUID && window.crypto.randomUUID()) ||
         'f-' + Date.now()
+      // 图片不需要对方确认，直接开传；其余文件仍走「等确认」流程
+      const direct = String(file.mime || '').startsWith('image/')
       this.fileSend[fileId] = {
         done: 0,
         total: 0,
         name: file.name,
-        sending: false,
-        waiting: true
+        sending: direct,
+        waiting: !direct
       }
       window.api.sendFile({
         fileId,
         ips,
-        convId: id,
-        groupId: isGroup ? id : null,
+        convId,
+        groupId,
+        direct,
         file
       })
-      this._appendMsg(id, {
+      this._appendMsg(convId, {
         from: this.self.id,
         fromName: this.self.name,
         ts: Date.now(),
@@ -615,8 +705,9 @@ export const useStore = defineStore('app', {
         kind: 'file',
         fileId,
         file: { name: file.name, size: file.size, mime: file.mime, path: file.path },
-        waiting: true,
-        sending: false
+        waiting: !direct,
+        sending: direct,
+        forwarded
       })
     },
     receiveChat(msg) {
@@ -745,6 +836,40 @@ export const useStore = defineStore('app', {
         file: { name: m.name, size: m.size, mime: m.mime },
         awaiting: true, // 等待本端确认接收
         receiving: false
+      })
+      this._bumpUnread(convId)
+      this.playNotify()
+    },
+    // 文件数据开始到达。
+// 两种情况：
+//   1) 普通文件 —— offer 阶段已在聊天区建了「待接收」卡片，这里只切成「接收中」；
+//   2) 图片等免确认直传 —— 根本没有 offer 事件，需要在这里即时新建消息，
+//      否则接收方界面会一直没有任何反应。
+    receiveFileIncoming(m) {
+      const convId = m.groupId || m.from || m.convId
+      if (!convId) return
+      const arr = this.messages[convId] || []
+      const exist = arr.find((x) => x.fileId === m.fileId)
+      if (exist) {
+        exist.awaiting = false
+        exist.receiving = true
+        return
+      }
+      this.fileRecv[m.fileId] = {
+        received: 0,
+        total: m.total || 0,
+        name: m.name
+      }
+      this._appendMsg(convId, {
+        from: m.from || '?',
+        fromName: m.fromName || '对方',
+        fromAvatar: m.fromAvatar || '',
+        ts: Date.now(),
+        mine: false,
+        kind: 'file',
+        fileId: m.fileId,
+        file: { name: m.name, size: m.size, mime: m.mime },
+        receiving: true
       })
       this._bumpUnread(convId)
       this.playNotify()

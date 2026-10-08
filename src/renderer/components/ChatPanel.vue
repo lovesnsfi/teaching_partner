@@ -58,8 +58,12 @@
         >
           {{ m.mine ? '我' : m.fromName }} · {{ fmt(m.ts) }}
         </div>
+        <!-- 头像 + 内容：顶部对齐。
+             早前用 items-end 让短文本气泡的头像贴着最后一行，但遇到图片、
+             文件卡片这类高内容时头像会被顶到最下方，与上方昵称时间脱节，
+             视觉上非常突兀，因此统一改为顶部对齐。 -->
         <div
-          class="flex items-end gap-2 max-w-[80%]"
+          class="flex items-start gap-2 max-w-[80%]"
           :class="m.mine ? 'flex-row-reverse' : 'flex-row'"
         >
           <Avatar
@@ -76,7 +80,21 @@
               {{ m.sticker }}
             </div>
 
-            <!-- 文件 -->
+            <!-- 文件 / 图片（图片带 image/* mime，内联直接显示） -->
+            <div
+              v-else-if="m.kind === 'file' && isImageMsg(m) && !isPending(m)"
+              class="flex"
+              :class="m.mine ? 'justify-end' : 'justify-start'"
+            >
+              <ChatImage
+                :path="m.file?.path"
+                :name="m.file?.name"
+                :mine="m.mine"
+                @preview="openPreview"
+                @contextmenu="openImgMenu(m, $event)"
+              />
+            </div>
+
             <div
               v-else-if="m.kind === 'file'"
               class="file-card"
@@ -91,7 +109,10 @@
                 </div>
                 <div class="text-[11px] text-slate-400">
                   {{ fmtSize(m.file?.size) }}
-                  <template v-if="m.awaiting">· 待接收</template>
+                  <template v-if="m.cancelled"
+                    >· {{ m.mine ? '对方已取消接收' : '已取消接收' }}</template
+                  >
+                  <template v-else-if="m.awaiting">· 待接收</template>
                   <template v-else-if="m.receiving"
                     >· 接收中 {{ recvPct(m.fileId) }}%</template
                   >
@@ -118,9 +139,20 @@
                 </div>
               </div>
 
+              <!-- 接收中：可随时中断（删除半截文件并通知发送方停发） -->
+              <button
+                v-if="m.receiving"
+                class="reject-btn flex-none"
+                type="button"
+                title="取消接收"
+                @click="cancelReceive(m.fileId)"
+              >
+                取消
+              </button>
+
               <!-- 接收方：等待用户确认接收（另存为会先弹出保存对话框） -->
               <div
-                v-if="m.awaiting"
+                v-else-if="m.awaiting"
                 class="flex gap-1 ml-auto flex-none items-center"
               >
                 <el-button
@@ -219,6 +251,25 @@
             <el-icon><PictureFilled /></el-icon>
           </button>
         </el-tooltip>
+        <el-tooltip content="框选截屏（拖动选择区域，复制并发送）" placement="top">
+          <button
+            class="tool-btn"
+            type="button"
+            :disabled="shooting"
+            @click="takeScreenshot"
+          >
+            <el-icon><Camera /></el-icon>
+          </button>
+        </el-tooltip>
+        <el-tooltip content="发送图片（也可直接 Ctrl+V 粘贴）" placement="top">
+          <button
+            class="tool-btn"
+            type="button"
+            @click="store.sendImageFromPicker()"
+          >
+            <el-icon><Picture /></el-icon>
+          </button>
+        </el-tooltip>
         <el-tooltip content="发送文件" placement="top">
           <button
             class="tool-btn"
@@ -238,8 +289,9 @@
           resize="none"
           size="large"
           @keydown.enter.exact="onEnter"
-          placeholder="输入消息，回车发送（Shift+Enter 换行）"
+          placeholder="输入消息，回车发送（Shift+Enter 换行；可直接粘贴截图）"
           class="chat-textarea"
+          @paste="onPaste"
         />
         <el-button
           type="primary"
@@ -257,14 +309,67 @@
         @pick-sticker="sendSticker"
       />
     </div>
+
+    <!-- 图片右键菜单：复制 / 转发 / 另存为 -->
+    <div
+      v-if="imgMenu.visible"
+      class="fixed z-[9999] bg-white border border-slate-200 rounded-lg shadow-lg py-1 text-[13px] text-slate-700 min-w-[132px]"
+      :style="{ left: imgMenu.x + 'px', top: imgMenu.y + 'px' }"
+      @click.stop
+      @contextmenu.prevent
+    >
+      <div class="px-3 pb-1 pt-0.5 text-[11px] text-slate-400 truncate">
+        {{ imgMenu.name }}
+      </div>
+      <div class="my-1 border-t border-slate-100"></div>
+      <button class="img-menu-item" type="button" @click="doCopyImage">
+        复制
+      </button>
+      <button class="img-menu-item" type="button" @click="openForward">
+        转发图片
+      </button>
+      <button class="img-menu-item" type="button" @click="doSaveImage">
+        另存为
+      </button>
+    </div>
+
+    <!-- 转发图片：选择联系人（可多选） -->
+    <ForwardDialog
+      v-if="showForward"
+      :visible="showForward"
+      :store="store"
+      @update:visible="showForward = $event"
+      @submit="doForward"
+    />
+
+    <!-- 图片大图预览 -->
+    <div
+      v-if="previewSrc"
+      class="fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center p-6"
+      @click="previewSrc = ''"
+    >
+      <img
+        :src="previewSrc"
+        :alt="previewName"
+        class="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+      />
+      <div
+        class="absolute top-4 right-5 text-white text-[13px] px-3 py-1 rounded bg-white/15"
+      >
+        {{ previewName }} · 点击空白处关闭
+      </div>
+    </div>
   </section>
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
 import { useStore } from '../store/index.js'
 import EmojiPicker from './EmojiPicker.vue'
 import Avatar from './Avatar.vue'
+import ChatImage from './ChatImage.vue'
+import ForwardDialog from './ForwardDialog.vue'
 
 const store = useStore()
 const text = ref('')
@@ -309,6 +414,138 @@ function onScroll() {
   if (!el) return
   if (el.scrollTop <= SCROLL_THRESHOLD && hiddenCount.value > 0) {
     loadMore()
+  }
+}
+
+// ===== 图片 =====
+// 文件消息带 image/* 的 mime 时，渲染为内联图片而不是文件卡片
+function isImageMsg(m) {
+  return !!(m && m.file && String(m.file.mime || '').startsWith('image/'))
+}
+// 传输未完成（等待确认 / 收发中 / 被拒 / 已取消）时先显示进度卡片，完成后才显示图片
+function isPending(m) {
+  return !!(
+    m.awaiting ||
+    m.receiving ||
+    m.rejected ||
+    m.cancelled ||
+    m.waiting ||
+    m.sending ||
+    sending(m.fileId)
+  )
+}
+const previewSrc = ref('')
+const previewName = ref('')
+function openPreview(src, name) {
+  previewSrc.value = src
+  previewName.value = name || ''
+}
+
+// ===== 截屏 =====
+const shooting = ref(false)
+async function takeScreenshot() {
+  if (shooting.value) return
+  shooting.value = true
+  try {
+    const r = await store.beginScreenshot()
+    if (r && r.ok) {
+      ElMessage.success('已打开框选截屏：按住左键拖动选区，双击或回车完成')
+    } else if (r && r.reason) {
+      ElMessage.error(r.reason)
+    }
+  } catch {
+    ElMessage.error('截屏失败')
+  } finally {
+    // 框选是异步流程（选区确认后才结束），这里先恢复按钮可用状态
+    setTimeout(() => {
+      shooting.value = false
+    }, 800)
+  }
+}
+
+// ===== 传输中取消接收 =====
+async function cancelReceive(fileId) {
+  const ok = await store.cancelReceive(fileId)
+  if (ok) ElMessage.info('已取消接收')
+}
+
+// ===== 图片右键菜单（复制 / 转发 / 另存为）=====
+const imgMenu = reactive({ visible: false, x: 0, y: 0, msg: null, name: '' })
+const showForward = ref(false)
+
+function openImgMenu(m, e) {
+  if (!m || !m.file || !m.file.path) return
+  imgMenu.msg = m
+  imgMenu.name = m.file.name || '图片'
+  imgMenu.x = Math.max(8, Math.min(e.clientX, window.innerWidth - 150))
+  imgMenu.y = Math.max(8, Math.min(e.clientY, window.innerHeight - 150))
+  imgMenu.visible = true
+}
+function closeImgMenu() {
+  imgMenu.visible = false
+  imgMenu.msg = null
+}
+
+async function doCopyImage() {
+  const m = imgMenu.msg
+  closeImgMenu()
+  if (!m) return
+  const ok = await window.api.copyImage(m.file.path)
+  if (ok) ElMessage.success('图片已复制到剪贴板')
+  else ElMessage.error('复制失败')
+}
+
+async function doSaveImage() {
+  const m = imgMenu.msg
+  closeImgMenu()
+  if (!m) return
+  const r = await window.api.saveImageAs({ path: m.file.path, name: m.file.name })
+  if (r && r.ok) ElMessage.success('图片已保存')
+  else if (r && r.canceled) ElMessage.info('已取消保存')
+  else ElMessage.error('保存失败')
+}
+
+function openForward() {
+  imgMenu.visible = false
+  showForward.value = true
+}
+function doForward(ids) {
+  const m = imgMenu.msg
+  showForward.value = false
+  if (!m || !m.file || !m.file.path) return
+  const n = store.forwardImage(
+    { path: m.file.path, name: m.file.name, size: m.file.size, mime: m.file.mime },
+    ids
+  )
+  imgMenu.msg = null
+  if (n > 0) ElMessage.success(`已转发给 ${n} 个会话`)
+  else ElMessage.warning('没有可转发的在线联系人')
+}
+
+// 直接粘贴截图（Ctrl+V）：把剪贴板里的图片落到临时文件，再走文件通道发送
+async function onPaste(e) {
+  const items = (e.clipboardData && e.clipboardData.items) || []
+  for (const it of items) {
+    if (it.type && it.type.startsWith('image/')) {
+      const blob = it.getAsFile()
+      if (!blob) continue
+      e.preventDefault()
+      if (!store.activeChatId) {
+        ElMessage.warning('请先选择要发送的对象')
+        return
+      }
+      try {
+        const file = await window.api.saveClipboardImage(blob, it.type)
+        if (!file) {
+          ElMessage.error('图片保存失败')
+          return
+        }
+        store.sendImageFile(file)
+      } catch {
+        ElMessage.error('图片发送失败')
+      }
+      return
+    }
   }
 }
 
@@ -373,7 +610,14 @@ function onDocMouseDown(e) {
     showPicker.value = false
   }
 }
-onMounted(() => document.addEventListener('mousedown', onDocMouseDown, true))
+onMounted(() => {
+  document.addEventListener('mousedown', onDocMouseDown, true)
+  // 框选截屏完成：图片已在剪贴板，这里只提示，不自动发送
+  window.api.onShotResult((m) => {
+    store.handleShotResult(m)
+    if (m && m.ok) ElMessage.success('截图已复制到剪贴板，可直接粘贴到聊天框发送')
+  })
+})
 onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMouseDown, true))
 
 watch(
@@ -397,6 +641,21 @@ watch(
 </script>
 
 <style scoped>
+/* 图片右键菜单项 */
+.img-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: #334155;
+  font-size: 13px;
+  cursor: pointer;
+}
+.img-menu-item:hover {
+  background: #f1f5f9;
+}
 /* 顶部「加载更早消息」按钮 */
 .load-more-btn {
   padding: 4px 12px;

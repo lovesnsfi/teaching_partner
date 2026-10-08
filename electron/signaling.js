@@ -81,8 +81,10 @@ export class Signaling extends EventEmitter {
     })
   }
 
-  // 在单一连接内连续发送多条 payload（用于文件分片），onProgress 每发一片回调一次
-  sendChunks(targetIp, payloads, onProgress) {
+  // 在单一连接内连续发送多条 payload（用于文件分片），onProgress 每发一片回调一次。
+  // shouldStop：可选的中断钩子，返回 true 时立刻停止发送并 resolve(false)。
+  // 用于接收方中途取消接收的场景，避免剩余分片继续占用带宽。
+  sendChunks(targetIp, payloads, onProgress, shouldStop) {
     return new Promise((resolve) => {
       if (!payloads || !payloads.length) return resolve(true)
       const url = `ws://${targetIp}:${SIGNAL_PORT}`
@@ -107,6 +109,8 @@ export class Signaling extends EventEmitter {
         let i = 0
         const sendNext = () => {
           if (i >= payloads.length) return finish(true)
+          // 接收方已取消：立即停发，关闭连接
+          if (shouldStop && shouldStop()) return finish(false)
           ws.send(
             JSON.stringify({
               ...payloads[i],

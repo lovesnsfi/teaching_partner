@@ -1,4 +1,16 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, dialog, shell, Menu, Tray } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  desktopCapturer,
+  ipcMain,
+  dialog,
+  shell,
+  Menu,
+  Tray,
+  clipboard,
+  nativeImage,
+  screen
+} from 'electron'
 import { join, extname, basename } from 'node:path'
 import os from 'node:os'
 import {
@@ -58,6 +70,8 @@ app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 // ===== 文件传输状态 =====
 // 接收中：fileId -> { stream, tmp, destPath, received, total, convId, groupId, fromName, name, size, mime }
+// 接收方中途取消的记录 fileId（发送方据此停发剩余分片）
+const cancelledFiles = new Set()
 const fileRecv = new Map()
 // 发送端：已发出「传输请求」、等待对方确认的文件 fileId -> spec
 //   spec = { fileId, ips, file, convId, groupId, granted:Set<ip>, rejectedCount }
@@ -227,6 +241,21 @@ function uniqueName(dir, name) {
   return candidate
 }
 
+// 根据扩展名推断 MIME（聊天内联显示图片、判断文件卡片形态都要用）
+const MIME_MAP = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  svg: 'image/svg+xml'
+}
+function mimeOf(p) {
+  const ext = extname(p || '').replace(/^\./, '').toLowerCase()
+  return MIME_MAP[ext] || 'application/octet-stream'
+}
+
 // 接收端：处理文件相关消息。
 // 与旧实现的关键差异：对端先发 offer（仅元信息），本端弹「接收 / 另存为」，
 // 用户确认后回 accept，对端才开始分片传输 —— 避免未经同意就被灌文件。
@@ -301,6 +330,20 @@ function handleFileMessage(msg) {
     return
   }
 
+  // 4) 接收方中途取消：立刻停止发送剩余分片
+  if (msg.action === 'cancel') {
+    cancelledFiles.add(msg.fileId)
+    // 稍后清理，避免同 fileId 长期残留
+    setTimeout(() => cancelledFiles.delete(msg.fileId), 60000)
+    if (win) {
+      win.webContents.send('lan:file-cancelled', {
+        fileId: msg.fileId,
+        convId: msg.convId || (pendingOut.get(msg.fileId) || {}).convId
+      })
+    }
+    return
+  }
+
   if (msg.action !== 'chunk') return
 
   let rec = fileRecv.get(msg.fileId)
@@ -313,6 +356,8 @@ function handleFileMessage(msg) {
       stream: createWriteStream(destPath || tmp),
       tmp,
       destPath,
+      // 记录来源，接收方取消时要据此通知发送方停发
+      fromIp: msg._from,
       received: 0,
       total: msg.total || 1,
       convId: msg.convId,
@@ -324,6 +369,24 @@ function handleFileMessage(msg) {
     }
     fileRecv.set(msg.fileId, rec)
     preRecvDest.delete(msg.fileId)
+    // 通知渲染层「文件开始到达」。
+    // 普通文件此前已通过 lan:file-offer 在聊天区建过卡片，这里只需把状态从
+    // 「待接收」切到「接收中」；而图片等免确认直传的场景没有 offer 事件，
+    // 就靠这条通知在聊天区即时新建消息 —— 否则接收方界面会毫无反应。
+    if (win) {
+      win.webContents.send('lan:file-incoming', {
+        fileId: msg.fileId,
+        name: msg.name,
+        size: msg.size,
+        mime: msg.mime,
+        total: msg.total || 1,
+        convId: msg.convId,
+        groupId: msg.groupId,
+        from: msg.from,
+        fromName: rec.fromName,
+        fromAvatar: msg.fromAvatar || ''
+      })
+    }
   }
   rec.stream.write(Buffer.from(msg.data, 'base64'))
   rec.received++
@@ -360,6 +423,7 @@ function handleFileMessage(msg) {
           fileId: msg.fileId,
           name: msg.name,
           size: msg.size,
+          mime: msg.mime || mimeOf(finalPath),
           path: finalPath,
           convId: msg.convId,
           groupId: msg.groupId,
@@ -368,6 +432,47 @@ function handleFileMessage(msg) {
           ts: Date.now()
         })
       }
+    })
+  }
+}
+
+// 免确认直发（图片）：不等对方点「接收」，立即开始分片传输。
+// 接收端在收到第一片时会自行补出消息（见 handleFileMessage 里的 lan:file-incoming）。
+async function directSend(spec) {
+  const perIp = Math.max(1, Math.ceil((spec.file.size || 0) / CHUNK_SIZE))
+  // 仍登记到 pendingOut：便于 startFileTransfer / reject 等既有逻辑复用同一份结构
+  pendingOut.set(spec.fileId, {
+    fileId: spec.fileId,
+    ips: spec.ips,
+    file: spec.file,
+    convId: spec.convId,
+    groupId: spec.groupId || null,
+    granted: new Set(spec.ips),
+    rejectedCount: 0
+  })
+  sendState.set(spec.fileId, { perIp, granted: spec.ips.length, done: 0 })
+  if (win) {
+    win.webContents.send('lan:file-send-start', {
+      fileId: spec.fileId,
+      convId: spec.convId,
+      groupId: spec.groupId,
+      name: spec.file.name,
+      size: spec.file.size
+    })
+  }
+  await sendFileToIps(
+    spec.ips,
+    spec.file,
+    spec.fileId,
+    spec.convId,
+    spec.groupId || null
+  )
+  pendingOut.delete(spec.fileId)
+  sendState.delete(spec.fileId)
+  if (win) {
+    win.webContents.send('lan:file-send-done', {
+      fileId: spec.fileId,
+      convId: spec.convId
     })
   }
 }
@@ -470,8 +575,10 @@ async function sendFileToIps(ips, file, fileId, convId, groupId) {
           total: Math.max(1, st.perIp * Math.max(1, st.granted))
         })
       }
-    })
+    }, () => cancelledFiles.has(fileId))
   }
+  // 接收方已取消：不再发「传输完成」，直接结束
+  if (cancelledFiles.has(fileId)) return false
   // 通知接收端：本次传输的分片已全部发出
   for (const ip of ips) {
     signaling.send(ip, {
@@ -835,6 +942,12 @@ app.whenReady().then(async () => {
   // 发送文件：此处只发出「传输请求」，等对方确认接收后才真正分片发送
   ipcMain.on('send:file', (_, spec) => {
     if (!signaling || !spec || !spec.ips || !spec.ips.length || !spec.file) return
+    // 图片等 direct 内容不需要对方确认，直接分片发送；
+    // 普通文件仍走「发请求 → 等确认」流程
+    if (spec.direct) {
+      directSend(spec)
+      return
+    }
     queueFileSend(spec)
   })
 
@@ -894,7 +1007,303 @@ app.whenReady().then(async () => {
     }
   })
 
-  ipcMain.handle('open:path', (_, p) => {
+  // 保存剪贴板里的图片（Ctrl+V 粘贴截图）到临时目录，返回 { path, name, size, mime }
+  ipcMain.handle('save:clipboardImage', async (_, dataUrl, mime) => {
+    try {
+      if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return null
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+      const buf = Buffer.from(base64, 'base64')
+      if (!buf.length) return null
+      const type = (mime && String(mime).startsWith('image/') && mime) || 'image/png'
+      const ext = type === 'image/jpeg' ? 'jpg' : type.split('/')[1] || 'png'
+      const dir = join(app.getPath('temp'), 'lan-clipboard')
+      mkdirSync(dir, { recursive: true })
+      const name = `paste-${Date.now()}.${ext}`
+      const p = join(dir, name)
+      writeFileSync(p, buf)
+      return { path: p, name, size: buf.length, mime: type }
+    } catch (e) {
+      console.error('[image] 保存剪贴板图片失败：', (e && e.message) || e)
+      return null
+    }
+  })
+
+  // 选择图片（聊天里直接内联显示，不走"文件卡片"那种形态）
+  ipcMain.handle('pick:image', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      properties: ['openFile'],
+      filters: [
+        {
+          name: '图片',
+          extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']
+        }
+      ],
+      title: '选择要发送的图片'
+    })
+    if (res.canceled || !res.filePaths.length) return null
+    const p = res.filePaths[0]
+    try {
+      const st = statSync(p)
+      return { path: p, name: basename(p), size: st.size, mime: mimeOf(p) }
+    } catch {
+      return null
+    }
+  })
+
+  // 读取已落盘的图片并转成 data URI，供渲染层 <img> 直接显示
+  ipcMain.handle('get:fileDataUrl', async (_, p) => {
+    try {
+      if (!p) return null
+      // 防御：超大图片转 baseURI 会占用大量内存，超过 24MB 直接不转
+      const st = statSync(p)
+      if (st.size > 24 * 1024 * 1024) return null
+      const buf = readFileSync(p)
+      return `data:${mimeOf(p)};base64,${buf.toString('base64')}`
+    } catch {
+      return null
+    }
+  })
+
+  // 接收方取消接收：停止写盘、删除半截临时文件，并通知发送方停发剩余分片
+  ipcMain.handle('file:cancelReceive', (_, { fileId } = {}) => {
+    try {
+      const rec = fileRecv.get(fileId)
+      if (rec) {
+        try {
+          rec.stream.end()
+        } catch {
+          /* ignore */
+        }
+        try {
+          rec.stream.destroy()
+        } catch {
+          /* ignore */
+        }
+        // 「另存为」指定的路径还没写完也要清掉
+        const partial = rec.destPath || rec.tmp
+        try {
+          if (partial && existsSync(partial)) unlinkSync(partial)
+        } catch {
+          /* ignore */
+        }
+        fileRecv.delete(fileId)
+        // 通知发送方停止发送
+        if (rec.fromIp && signaling) {
+          signaling.send(rec.fromIp, { type: 'file', action: 'cancel', fileId })
+        }
+      }
+      pendingIn.delete(fileId)
+      preRecvDest.delete(fileId)
+      return { ok: true }
+    } catch (e) {
+      console.error('[file] 取消接收失败：', (e && e.message) || e)
+      return { ok: false }
+    }
+  })
+
+  // 把图片复制到系统剪贴板
+  ipcMain.handle('img:copy', (_, p) => {
+    try {
+      if (!p || !existsSync(p)) return false
+      const img = nativeImage.createFromPath(p)
+      if (img.isEmpty()) return false
+      clipboard.writeImage(img)
+      return true
+    } catch (e) {
+      console.error('[image] 复制到剪贴板失败：', (e && e.message) || e)
+      return false
+    }
+  })
+
+  // 图片「另存为」：弹出保存对话框并复制到指定位置
+  ipcMain.handle('img:saveAs', async (_, { path: src, name } = {}) => {
+    try {
+      if (!src || !existsSync(src)) return { ok: false }
+      const res = await dialog.showSaveDialog(win, {
+        title: '保存图片',
+        defaultPath: name || basename(src)
+      })
+      if (res.canceled || !res.filePath) return { ok: false, canceled: true }
+      writeFileSync(res.filePath, readFileSync(src))
+      return { ok: true, path: res.filePath }
+    } catch (e) {
+      console.error('[image] 另存为失败：', (e && e.message) || e)
+      return { ok: false }
+    }
+  })
+
+// ===== 框选截屏 =====
+// 流程：隐藏主窗口 → 抓取鼠标所在显示器整屏 → 用一个全屏透明窗口做框选层
+//      → 用户确认后按选区裁剪、写入剪贴板、可选发回主窗口。
+let shotWin = null
+let shotSource = null // { path, width, height, displayId }
+
+function closeShotWindow() {
+  const w = shotWin
+  shotWin = null
+  if (w && !w.isDestroyed()) {
+    try {
+      w.destroy()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+// 恢复主窗口（截屏前会隐藏，否则会被拍进去）
+async function restoreMainWindow() {
+  if (win && !win.isDestroyed()) {
+    try {
+      if (!win.isVisible()) win.showInactive()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+ipcMain.handle('shot:begin', async () => {
+  try {
+    closeShotWindow()
+      const pt = screen.getCursorScreenPoint()
+    const display = screen.getDisplayNearestPoint(pt) || screen.getPrimaryDisplay()
+    const b = display.bounds
+    // 先隐藏主窗口再抓图，否则会把聊天界面一起拍进去
+    const wasVisible = win && !win.isDestroyed() && win.isVisible()
+    if (wasVisible) win.hide()
+    await new Promise((r) => setTimeout(r, 260))
+    const ratio = Math.min(1, 2560 / b.width, 1440 / b.height)
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: Math.round(b.width * ratio), height: Math.round(b.height * ratio) }
+    })
+    const src =
+      sources.find((s) => String(s.display_id) === String(display.id)) || sources[0]
+    if (!src || !src.thumbnail || src.thumbnail.isEmpty()) {
+      if (wasVisible) win.showInactive()
+      return { ok: false, reason: '当前环境不支持屏幕截取（远程桌面 / 虚拟机常见）' }
+    }
+    const png = src.thumbnail.toPNG()
+    const dir = join(app.getPath('temp'), 'lan-shot')
+    mkdirSync(dir, { recursive: true })
+    const p2 = (n) => String(n).padStart(2, '0')
+    const d = new Date()
+    const fp = join(
+      dir,
+      `shot-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}.png`
+    )
+    writeFileSync(fp, png)
+    shotSource = {
+      path: fp,
+      dataUrl: `data:image/png;base64,${png.toString('base64')}`,
+      // 遮罩层 / 鼠标坐标用的是「显示器尺寸」，
+      // 而落盘 PNG 可能被 ratio 缩小过，裁剪时必须换算回 PNG 像素坐标
+      width: b.width,
+      height: b.height,
+      pngWidth: src.thumbnail.getSize().width,
+      pngHeight: src.thumbnail.getSize().height
+    }
+    if (wasVisible) win.showInactive()
+
+    // 全屏透明框选层
+    shotWin = new BrowserWindow({
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      hasShadow: false,
+      resizableHint: false,
+      backgroundColor: '#00000000',
+      webPreferences: {
+        preload: join(__dirname, '../preload/preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    })
+    shotWin.setAlwaysOnTop(true, 'screen-saver')
+    shotWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    const query = { screenshot: '1' }
+    if (RENDERER_DEV_URL) {
+      const url = new URL(RENDERER_DEV_URL)
+      for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v)
+      shotWin.loadURL(url.toString())
+    } else {
+      shotWin.loadFile(join(DIST, 'index.html'), { query })
+    }
+    shotWin.on('closed', () => {
+      shotWin = null
+      shotSource = null
+    })
+    return { ok: true }
+  } catch (e) {
+    console.error('[shot] 开始截屏失败：', (e && e.message) || e)
+    await restoreMainWindow()
+    return { ok: false, reason: (e && e.message) || String(e) }
+  }
+})
+
+// 框选层向主进程取那张「底图」
+ipcMain.handle('shot:image', () => {
+  if (!shotSource) return null
+  return { dataUrl: shotSource.dataUrl, width: shotSource.width, height: shotSource.height }
+})
+
+// 确认选区：裁剪 → 写剪贴板 → 可选发回主窗口
+ipcMain.handle('shot:confirm', (_, rect) => {
+  try {
+    if (!shotSource || !rect) return { ok: false }
+    // 选区坐标是显示器尺寸下的值，PNG 可能是缩放后的，必须按比例换算并夹紧，
+    // 否则会裁到越界区域（表现为选区跑位/空白）
+    const sx = (shotSource.pngWidth || shotSource.width) / shotSource.width
+    const sy = (shotSource.pngHeight || shotSource.height) / shotSource.height
+    const full = nativeImage.createFromPath(shotSource.path)
+    const pw = full.getSize().width || shotSource.width
+    const ph = full.getSize().height || shotSource.height
+    const x = Math.max(0, Math.min(Math.round(rect.x * sx), pw - 1))
+    const y = Math.max(0, Math.min(Math.round(rect.y * sy), ph - 1))
+    const w = Math.max(1, Math.min(Math.round(rect.width * sx), pw - x))
+    const h = Math.max(1, Math.min(Math.round(rect.height * sy), ph - y))
+    const img = full.crop({ x, y, width: w, height: h })
+    if (img.isEmpty()) return { ok: false, reason: '选区无效' }
+    clipboard.writeImage(img)
+    const png = img.toPNG()
+    const dir = join(app.getPath('temp'), 'lan-shot')
+    mkdirSync(dir, { recursive: true })
+    const p2 = (n) => String(n).padStart(2, '0')
+    const d = new Date()
+    const name = `screenshot-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}.png`
+    const fp = join(dir, name)
+    writeFileSync(fp, png)
+    closeShotWindow()
+    // 结果回传给主窗口：按需求**只放剪贴板，不自动发送**，
+    // 用户可自行粘贴到聊天框；这里带上 file 供后续「顺便发送」之类功能使用。
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('shot:result', {
+        ok: true,
+        file: { path: fp, name, size: png.length, mime: 'image/png' }
+      })
+    }
+    return { ok: true }
+  } catch (e) {
+    console.error('[shot] 截屏确认失败：', (e && e.message) || e)
+    return { ok: false, reason: (e && e.message) || String(e) }
+  }
+})
+
+ipcMain.handle('shot:cancel', () => {
+  closeShotWindow()
+  return { ok: true }
+})
+
+ipcMain.handle('open:path', (_, p) => {
     try {
       shell.openPath(p)
     } catch {

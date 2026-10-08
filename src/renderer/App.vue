@@ -59,6 +59,7 @@
       :channel="update.channel"
       :data="update.data"
       @install="installUpdate"
+      @background="backgroundUpdate"
     />
   </div>
 </template>
@@ -79,6 +80,10 @@ const showSettings = ref(false)
 
 // 自动更新弹窗状态：由主进程经 preload 推送的 updater:event 驱动
 const update = reactive({ visible: false, channel: '', data: {} })
+// 用户是否选择了「后台下载」：选了就静默下载，下载进度不再弹窗打扰，
+// 等下载完成再统一提示「已就绪，可重启」。
+const bgDownload = ref(false)
+// 仅这些事件会驱动更新弹窗切换内容
 const VISIBLE_CHANNELS = [
   'update-available',
   'download-progress',
@@ -89,9 +94,25 @@ const VISIBLE_CHANNELS = [
 ]
 function onUpdateEvent(payload) {
   if (!payload) return
+  // 'feed' 只是「当前更新源变了」的旁路通知，不参与弹窗内容，
+  // 若也覆盖 channel 会把正在显示的弹窗清空
+  if (payload.channel === 'feed') {
+    update.data = { ...update.data, feed: payload.data }
+    return
+  }
   update.channel = payload.channel
   update.data = payload.data || {}
-  if (VISIBLE_CHANNELS.includes(payload.channel)) update.visible = true
+  if (!VISIBLE_CHANNELS.includes(payload.channel)) return
+  // 新一轮更新：重置「后台下载」标记
+  if (payload.channel === 'update-available') bgDownload.value = false
+  // 已经在后台下载时，下载进度不再反复弹窗；但「已完成」必须提示
+  if (payload.channel === 'download-progress' && bgDownload.value) return
+  update.visible = true
+}
+// 用户点「后台下载」：收起弹窗，下载继续在后台进行
+function backgroundUpdate() {
+  bgDownload.value = true
+  update.visible = false
 }
 function installUpdate() {
   if (window.api) window.api.quitAndInstall()

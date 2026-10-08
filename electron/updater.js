@@ -6,13 +6,41 @@ autoUpdater.autoDownload = true
 // 退出时若已下载完成则自动安装（用户选「稍后」时，下次程序退出自动装）
 autoUpdater.autoInstallOnAppQuit = true
 
+const GH_RELEASES = 'https://github.com/lovesnsfi/teaching_partner/releases/latest/download'
+
+// ============================================================================
+// 更新源（按顺序尝试，失败自动切到下一个）
+// ----------------------------------------------------------------------------
+// 用的是 electron-updater 的 generic provider：它直接读取
+//   <url>/latest.yml          （版本清单，含文件 sha512 与大小）
+//   <url>/<安装包名>.exe       （安装包与 blockmap）
+// 相比 github provider 需要解析 GitHub 网页 / Atom 源，这种方式更简单也更稳
+// （之前就因为 Atom + Accept 头不匹配被 GitHub 判为 406 而失败）。
+//
+// 末尾的 releases/latest/download 是 GitHub 官方给的「最新版本」固定别名，
+// 每次发版不用改地址。
+//
+// ★ 自建源（推荐、最稳）：你之前提到有带公网 IP 的 fnos 服务器，
+//   把 Release 里的三个文件（exe / exe.blockmap / latest.yml）传到自己的服务器，
+//   然后把下面这一行加到数组最前面即可全网走自己的通道：
+//     { name: '自建服务器', url: 'https://你的域名/局域网沟通广播' }
+// ============================================================================
+const UPDATE_FEEDS = [
+  { name: 'GitHub 直连', url: GH_RELEASES },
+  { name: 'ghfast 加速', url: 'https://ghfast.top/' + GH_RELEASES }
+]
+
 // 主窗口引用由 main.js 通过 getter 注入，便于窗口被重建（托盘恢复）后仍能推送事件
 let winGetter = () => null
 
 // 本次检查是否由用户手动触发。
-// 自动检查（启动后延迟执行）失败通常是因为纯内网无外网、GitHub 限流等，
+// 自动检查（启动后延迟执行）失败通常是因为纯内网无外网、源不可达等，
 // 这类失败不应打扰用户，只写控制台；手动点「检查更新」时才弹窗告知原因。
 let manualCheck = false
+
+// 当前使用的更新源下标；retrying 用于保证「一次检查最多切一次源」，避免死循环
+let feedIndex = 0
+let retrying = false
 
 // 把更新事件统一通过该 channel 发送到渲染层，payload = { channel, data }
 function send(channel, data) {
@@ -20,6 +48,30 @@ function send(channel, data) {
   if (w && !w.isDestroyed()) {
     w.webContents.send('updater:event', { channel, data })
   }
+}
+
+function feedInfo() {
+  const f = UPDATE_FEEDS[feedIndex] || { name: '-', url: '' }
+  return { name: f.name, url: f.url, index: feedIndex, total: UPDATE_FEEDS.length }
+}
+
+// 切换更新源：setFeedURL 传字符串即等价于 generic provider + 该 url
+function applyFeed(index, reason) {
+  feedIndex = Math.max(0, Math.min(index, UPDATE_FEEDS.length - 1))
+  const f = UPDATE_FEEDS[feedIndex]
+  autoUpdater.setFeedURL(f.url)
+  console.log(
+    `[updater] 更新源：${f.name}${reason ? '（' + reason + '）' : ''} -> ${f.url}`
+  )
+  send('feed', feedInfo())
+  return f
+}
+
+// 尝试切到下一个源；没有下一个可用时返回 false
+function switchToNextFeed() {
+  if (feedIndex + 1 >= UPDATE_FEEDS.length) return false
+  applyFeed(feedIndex + 1, '上一个源不可用，自动切换')
+  return true
 }
 
 // GitHub Releases 的 releaseNotes 可能是字符串，也可能是
@@ -38,19 +90,34 @@ function normalizeNotes(notes) {
 export function setupAutoUpdater(getter) {
   if (typeof getter === 'function') winGetter = getter
 
+  // 指定更新源（必须在第一次 checkForUpdates 之前）
+  applyFeed(0)
+
   // ---- 事件转发 ----
-  autoUpdater.on('checking-for-update', () => send('checking', {}))
+  autoUpdater.on('checking-for-update', () => {
+    retrying = false
+    send('checking', { feed: feedInfo() })
+  })
 
   autoUpdater.on('update-available', (info) => {
+    retrying = false
     send('update-available', {
       version: info.version,
       releaseNotes: normalizeNotes(info.releaseNotes),
-      releaseDate: info.releaseDate || null
+      releaseDate: info.releaseDate || null,
+      feed: feedInfo()
     })
   })
 
   autoUpdater.on('update-not-available', (info) => {
-    send('update-not-available', { version: info.version })
+    retrying = false
+    // 「没有新版本」在启动时的自动检查里属于常态，不该弹窗打扰用户，
+    // 只写控制台即可；用户主动点「检查更新」时给明确的「已是最新版本」反馈。
+    if (!manualCheck) {
+      console.log(`[updater] 当前已是最新版本：${info.version}`)
+      return
+    }
+    send('update-not-available', { version: info.version, feed: feedInfo() })
   })
 
   autoUpdater.on('download-progress', (p) => {
@@ -58,26 +125,48 @@ export function setupAutoUpdater(getter) {
       percent: p.percent,
       transferred: p.transferred,
       total: p.total,
-      bytesPerSecond: p.bytesPerSecond
+      bytesPerSecond: p.bytesPerSecond,
+      feed: feedInfo()
     })
   })
 
   autoUpdater.on('update-downloaded', (info) => {
+    retrying = false
     send('update-downloaded', {
       version: info.version,
-      releaseNotes: normalizeNotes(info.releaseNotes)
+      releaseNotes: normalizeNotes(info.releaseNotes),
+      releaseDate: info.releaseDate || null,
+      feed: feedInfo()
     })
   })
 
   autoUpdater.on('error', (e) => {
     const message = (e && e.message) || String(e)
+    // 本轮已经切过一次源仍然失败 → 不再继续切，直接按结果收尾
+    if (retrying) {
+      retrying = false
+      reportFailure(message)
+      return
+    }
+    if (switchToNextFeed()) {
+      retrying = true
+      console.warn('[updater] 当前源不可用，切换后重试：', message)
+      autoUpdater.checkForUpdates().catch(() => {
+        /* 失败信息由 error 事件统一处理 */
+      })
+      return
+    }
+    reportFailure(message)
+  })
+
+  function reportFailure(message) {
     if (!manualCheck) {
       // 自动检查失败：静默处理，不弹窗（内网无外网等属正常情况）
       console.warn('[updater] 自动检查更新失败（已忽略）:', message)
       return
     }
-    send('error', { message })
-  })
+    send('error', { message, feed: feedInfo() })
+  }
 
   // ---- 渲染层主动触发的 IPC ----
   ipcMain.handle('updater:check', async () => {
@@ -87,6 +176,7 @@ export function setupAutoUpdater(getter) {
       return { skipped: true }
     }
     manualCheck = true
+    retrying = false
     try {
       await autoUpdater.checkForUpdates()
       return { ok: true }
@@ -109,7 +199,7 @@ export function setupAutoUpdater(getter) {
     }
   })
 
-  // 打包状态下，启动后延迟自动检查一次（不打扰启动，也避免频繁请求 GitHub）
+  // 打包状态下，启动后延迟自动检查一次（不打扰启动，也避免频繁请求远端）
   if (app.isPackaged) {
     setTimeout(() => {
       autoUpdater.checkForUpdates().catch(() => {
