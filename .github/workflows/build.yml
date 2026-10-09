@@ -21,6 +21,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 快速失败：tag 与 package.json 版本必须一致。
+      # electron-builder 是按 package.json 的 version 决定发布到哪个 Release 的
+      # （tag -> v${version}），二者不一致时会把产物传到旧版本上，
+      # 而 GitHub 自动创建的同名 Release 里只剩 Source code，很难察觉。
+      - name: Verify tag matches package.json version
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json | ConvertFrom-Json).version
+          $tag = $env:GITHUB_REF_NAME
+          Write-Output "tag=$tag  package.json version=$pkg"
+          if ($tag -and $tag.StartsWith('v') -and ($tag -ne ('v' + $pkg))) {
+            Write-Output "::error::tag ($tag) 与 package.json 版本 ($pkg) 不一致，请先提交版本号再打 tag"
+            exit 1
+          }
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

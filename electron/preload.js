@@ -55,6 +55,8 @@ const api = {
     ipcRenderer.on('lan:broadcast-closed', (_e, p) => cb(p || {})),
   // 选择文件，返回 { path, name, size, mime } 或 null
   pickFile: () => ipcRenderer.invoke('pick:file'),
+  // 用系统默认浏览器打开外部链接（仅 https）
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   // 选择图片（聊天内联显示）
   pickImage: () => ipcRenderer.invoke('pick:image'),
   // 保存剪贴板里的图片（Ctrl+V 粘贴截图），返回 { path, name, size, mime }

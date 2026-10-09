@@ -1303,7 +1303,24 @@ ipcMain.handle('shot:cancel', () => {
   return { ok: true }
 })
 
-ipcMain.handle('open:path', (_, p) => {
+// 用系统默认浏览器打开外部链接（作者主页等）。
+// 做协议白名单校验：只允许 https，避免渲染层被诱导打开本地文件等危险协议。
+  ipcMain.handle('shell:openExternal', async (_, url) => {
+    try {
+      const u = String(url || '')
+      if (!/^https:\/\//i.test(u)) {
+        console.warn('[shell] 拒绝打开非 https 链接：', u)
+        return false
+      }
+      await shell.openExternal(u)
+      return true
+    } catch (e) {
+      console.error('[shell] 打开外部链接失败：', (e && e.message) || e)
+      return false
+    }
+  })
+
+  ipcMain.handle('open:path', (_, p) => {
     try {
       shell.openPath(p)
     } catch {
