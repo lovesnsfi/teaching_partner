@@ -1,5 +1,6 @@
 import { autoUpdater } from 'electron-updater'
 import { app, ipcMain } from 'electron'
+import https from 'node:https'
 
 // 自动下载：发现新版本后立即开始下载（配合下面的进度/完成事件给 UI 反馈）
 autoUpdater.autoDownload = true
@@ -9,7 +10,7 @@ autoUpdater.autoInstallOnAppQuit = true
 const GH_RELEASES = 'https://github.com/lovesnsfi/teaching_partner/releases/latest/download'
 
 // ============================================================================
-// 更新源（按顺序尝试，失败自动切到下一个）
+// 更新源（**按数组顺序尝试**，第一个可用的即被采用）
 // ----------------------------------------------------------------------------
 // 用的是 electron-updater 的 generic provider：它直接读取
 //   <url>/latest.yml          （版本清单，含文件 sha512 与大小）
@@ -20,15 +21,61 @@ const GH_RELEASES = 'https://github.com/lovesnsfi/teaching_partner/releases/late
 // 末尾的 releases/latest/download 是 GitHub 官方给的「最新版本」固定别名，
 // 每次发版不用改地址。
 //
-// ★ 自建源（推荐、最稳）：你之前提到有带公网 IP 的 fnos 服务器，
-//   把 Release 里的三个文件（exe / exe.blockmap / latest.yml）传到自己的服务器，
-//   然后把下面这一行加到数组最前面即可全网走自己的通道：
+// ★ 顺序：镜像优先、GitHub 兜底。
+//   国内直连 GitHub 经常长时间无响应，放第一位会把每次检查都拖慢；
+//   镜像不通（挂了就换域名）时再自动回落到官方地址。
+//
+// ★ 自建源（最稳）：你之前提到有带公网 IP 的 fnos 服务器，把 Release 里的
+//   三个文件（exe / exe.blockmap / latest.yml）传上去，然后把下面这行加到
+//   数组最前面即可全网走自己的通道：
 //     { name: '自建服务器', url: 'https://你的域名/局域网沟通广播' }
 // ============================================================================
 const UPDATE_FEEDS = [
-  { name: 'GitHub 直连', url: GH_RELEASES },
-  { name: 'ghfast 加速', url: 'https://ghfast.top/' + GH_RELEASES }
+  { name: 'ghfast 加速', url: 'https://ghfast.top/' + GH_RELEASES },
+  { name: 'GitHub 直连', url: GH_RELEASES }
 ]
+
+// 探测单个源是否可用：只请求 latest.yml（几百字节），带超时。
+// electron-updater 本身没有可配的请求超时，镜像被墙时会长时间挂起，
+// 所以先用短超时快速探一遍，直接选中可用源，避免干等。
+const PROBE_TIMEOUT = 4000
+function probeFeed(url) {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (ok) => {
+      if (!settled) {
+        settled = true
+        resolve(ok)
+      }
+    }
+    try {
+      const req = https.get(url + '/latest.yml', { timeout: PROBE_TIMEOUT }, (res) => {
+        const ok = res.statusCode >= 200 && res.statusCode < 400
+        res.resume()
+        finish(ok)
+      })
+      req.on('timeout', () => {
+        req.destroy()
+        finish(false)
+      })
+      req.on('error', () => finish(false))
+    } catch {
+      finish(false)
+    }
+  })
+}
+
+// 按顺序探测，选中第一个可用的源；全都不通则保持当前源，交由错误流程上报
+async function pickAvailableFeed() {
+  for (let i = 0; i < UPDATE_FEEDS.length; i++) {
+    if (await probeFeed(UPDATE_FEEDS[i].url)) {
+      if (i !== feedIndex) applyFeed(i, '自动选择可用源')
+      return UPDATE_FEEDS[i]
+    }
+    console.log(`[updater] 源不可用，跳过：${UPDATE_FEEDS[i].name}`)
+  }
+  return null
+}
 
 // 主窗口引用由 main.js 通过 getter 注入，便于窗口被重建（托盘恢复）后仍能推送事件
 let winGetter = () => null
@@ -151,7 +198,7 @@ export function setupAutoUpdater(getter) {
     if (switchToNextFeed()) {
       retrying = true
       console.warn('[updater] 当前源不可用，切换后重试：', message)
-      autoUpdater.checkForUpdates().catch(() => {
+      runCheck().catch(() => {
         /* 失败信息由 error 事件统一处理 */
       })
       return
@@ -168,7 +215,14 @@ export function setupAutoUpdater(getter) {
     send('error', { message, feed: feedInfo() })
   }
 
-  // ---- 渲染层主动触发的 IPC ----
+  // 统一入口：先快速探测可用源，再交给 electron-updater 正式检查。
+// 这样「镜像不通 → GitHub 兜底」的切换在几秒内完成，而不是等一次长超时。
+async function runCheck() {
+  await pickAvailableFeed()
+  return autoUpdater.checkForUpdates()
+}
+
+// ---- 渲染层主动触发的 IPC ----
   ipcMain.handle('updater:check', async () => {
     // 开发模式（npm run dev）没有发布版本，跳过检查避免无意义报错
     if (!app.isPackaged) {
@@ -178,7 +232,7 @@ export function setupAutoUpdater(getter) {
     manualCheck = true
     retrying = false
     try {
-      await autoUpdater.checkForUpdates()
+      await runCheck()
       return { ok: true }
     } catch (e) {
       // 失败信息已由上面的 error 事件统一上报，这里只把结果回给调用方，避免重复弹窗
@@ -202,7 +256,7 @@ export function setupAutoUpdater(getter) {
   // 打包状态下，启动后延迟自动检查一次（不打扰启动，也避免频繁请求远端）
   if (app.isPackaged) {
     setTimeout(() => {
-      autoUpdater.checkForUpdates().catch(() => {
+      runCheck().catch(() => {
         /* 失败静默：网络不可达、限流等都不应影响正常使用 */
       })
     }, 10000)

@@ -271,6 +271,23 @@
             <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
               新版本通过 GitHub 下载安装，更新过程不会丢失本地聊天记录与联系人。
             </p>
+
+            <!-- 作者信息 -->
+            <div
+              class="mt-4 flex items-center justify-between p-3 rounded-xl border border-slate-200"
+            >
+              <div class="pr-4 min-w-0">
+                <div class="font-medium text-slate-800 text-[13px]">作者</div>
+                <div class="text-[12px] text-slate-500 mt-0.5">二当家的</div>
+              </div>
+              <el-button size="small" @click="openAuthorPage">
+                <el-icon class="mr-1"><Link /></el-icon>GitHub 主页
+              </el-button>
+            </div>
+
+            <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
+              内网聊天与屏幕广播工具，仅供局域网内使用，不经过任何服务器中转。
+            </p>
           </div>
         </div>
       </div>
@@ -339,6 +356,12 @@ async function checkUpdate() {
     // 关闭设置，露出 App.vue 中的全局更新提示弹窗
     emit('close')
   }
+}
+
+// 作者主页（与 electron-builder 的仓库地址保持一致）
+const AUTHOR_URL = 'https://github.com/lovesnsfi'
+function openAuthorPage() {
+  if (window.api && window.api.openExternal) window.api.openExternal(AUTHOR_URL)
 }
 
 function pickLocal() {
