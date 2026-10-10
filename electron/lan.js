@@ -5,6 +5,9 @@ import { EventEmitter } from 'node:events'
 const DISCOVERY_PORT = 41234
 const BROADCAST_INTERVAL = 3000
 const HEARTBEAT_TIMEOUT = 12000
+// 退出告别包：UDP 可能丢包，连发几遍确保对方一定收到
+const BYE_REPEAT = 3
+const BYE_INTERVAL = 60
 
 // 用户选定的通信网卡 IP（null 表示自动/全部网卡）
 let selectedIp = null
@@ -153,8 +156,19 @@ export class LanDiscovery extends EventEmitter {
     } catch {
       return
     }
-    if (!data || data.type !== 'hello' || !data.id) return
+    if (!data || !data.id) return
     if (data.id === this.self.id) return
+
+    // 对方主动告别（正常退出）：立刻置为离线，不用干等 12s 心跳超时。
+    // 这是「一方退出，其他电脑马上显示离线」的关键。
+    if (data.type === 'bye') {
+      if (this.devices.delete(data.id)) {
+        this.emit('update', this.list())
+      }
+      return
+    }
+
+    if (data.type !== 'hello') return
 
     const ip = rinfo.address
     const host = data.host || ''
@@ -191,6 +205,49 @@ export class LanDiscovery extends EventEmitter {
     }
   }
 
+  // 广播下线通告：告诉所有邻居「我走了」，让它们立即把我标为离线
+  _sendBye(onDone) {
+    const finish = () => {
+      if (typeof onDone === 'function') onDone()
+    }
+    // 捕获当前 socket 引用：回调里用局部变量关闭，
+    // 避免期间 rebind() 换了新 socket 之后误关掉新的那个
+    const sock = this.socket
+    if (!sock || this._byeSent) return finish()
+    this._byeSent = true
+    const payload = Buffer.from(JSON.stringify({ type: 'bye', id: this.self.id }))
+    const target =
+      this.bindIp && this.bindIp !== '0.0.0.0'
+        ? getBroadcastFor(this.bindIp)
+        : '255.255.255.255'
+    let sent = 0
+    const sendOnce = () => {
+      // 补发到点或 socket 已不可用时停止
+      if (sent >= BYE_REPEAT || sock.destroyed) return finish()
+      try {
+        sock.send(
+          payload,
+          0,
+          payload.length,
+          DISCOVERY_PORT,
+          target,
+          (err) => {
+            if (err) return finish()
+            sent++
+            if (sent < BYE_REPEAT) {
+              setTimeout(sendOnce, BYE_INTERVAL)
+            } else {
+              finish()
+            }
+          }
+        )
+      } catch {
+        finish()
+      }
+    }
+    sendOnce()
+  }
+
   _purge() {
     const now = Date.now()
     let changed = false
@@ -224,10 +281,15 @@ export class LanDiscovery extends EventEmitter {
   destroy() {
     clearInterval(this._interval)
     clearInterval(this._cleanup)
-    try {
-      this.socket.close()
-    } catch {
-      /* ignore */
-    }
+    // 先把「我下线了」广播出去（连发数遍防丢包），发完再关 socket，
+    // 这样对方电脑能立刻把联系人置为离线，而不是等满 12s 心跳超时。
+    this._sendBye(() => {
+      const sock = this.socket
+      try {
+        if (sock) sock.close()
+      } catch {
+        /* ignore */
+      }
+    })
   }
 }

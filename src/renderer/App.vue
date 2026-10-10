@@ -107,7 +107,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, watch, onMounted } from 'vue'
 import { useStore } from './store/index.js'
 import { loadAvatars } from './avatars.js'
 import DeviceList from './components/DeviceList.vue'
@@ -168,7 +168,19 @@ onMounted(() => {
   if (window.api && window.api.onUpdateEvent) {
     window.api.onUpdateEvent(onUpdateEvent)
   }
+  // 广播状态只存在于渲染层，上报给主进程用于「退出前确认」
+  reportBroadcast()
+  watch(
+    () => store.broadcast.teacherActive,
+    () => reportBroadcast()
+  )
 })
+
+function reportBroadcast() {
+  if (window.api && window.api.reportActivity) {
+    window.api.reportActivity('broadcast', !!store.broadcast.teacherActive)
+  }
+}
 
 function onMinimize() {
   if (window.api) window.api.windowMinimize()

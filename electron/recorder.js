@@ -397,3 +397,19 @@ export async function stopRecording() {
 export function isRecording() {
   return !!_proc
 }
+
+// 强制结束录制（更新安装前调用）：立刻杀掉 ffmpeg 进程，不做定稿、不 rename。
+// 应用退出时若留着 ffmpeg 子进程，它会继续占用磁盘并写出一个残缺的 mp4。
+export function killRecording() {
+  if (!_proc) return false
+  const proc = _proc
+  _proc = null
+  try {
+    proc.kill()
+  } catch {
+    /* ignore */
+  }
+  _tmpPath = null
+  _outPath = null
+  return true
+}

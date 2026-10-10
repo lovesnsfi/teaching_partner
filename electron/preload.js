@@ -85,6 +85,9 @@ const api = {
   getAppVersion: () => ipcRenderer.invoke('getAppVersion'),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   quitAndInstall: () => ipcRenderer.invoke('updater:quit-install'),
+  // 上报活动状态（目前只有广播），主进程据此在退出时弹确认
+  reportActivity: (type, active) =>
+    ipcRenderer.invoke('activity:report', { type, active }),
   onUpdateEvent: (cb) => ipcRenderer.on('updater:event', (_e, payload) => cb(payload)),
   onChat: (cb) => ipcRenderer.on('lan:chat', (_e, msg) => cb(msg)),
   onSignal: (cb) => ipcRenderer.on('lan:signal', (_e, msg) => cb(msg)),

@@ -134,8 +134,35 @@ function normalizeNotes(notes) {
   return String(notes)
 }
 
-export function setupAutoUpdater(getter) {
+export function setupAutoUpdater(getter, cleanupBeforeUpdate) {
   if (typeof getter === 'function') winGetter = getter
+
+  // ---- 更新安装时的强制退出 ----
+  // quitAndInstall() 是「先 spawn 安装器、再 app.quit()」，安装器会比本进程
+  // 先跑起来；若本进程还在优雅退出（销毁窗口 / 断 WebRTC / 关 SQLite），
+  // 安装器就会弹出「程序还在运行，请手动关闭」。这里在 before-quit 时
+  // 直接 app.exit(0)，几十毫秒内释放 exe 句柄，安装器即可直接覆盖安装。
+  //
+  // 安装器是 detached + unref 启动的，与本进程完全脱离，强制退出不影响它。
+  let installing = false
+  let downloaded = false
+  app.on('before-quit', () => {
+    if (installing) {
+      // 安装器已由 quitAndInstall 内部 spawn 出来，直接强制退出即可
+      console.log('[updater] 强制退出（为安装更新）')
+      app.exit(0)
+      return
+    }
+    if (downloaded && autoUpdater.autoInstallOnAppQuit) {
+      // 「退出时自动安装」这条路径里，安装器是由 electron-updater 自己的
+      // before-quit 监听器 spawn 的，而那个监听器注册得比我们晚，
+      // 必须让它先执行，所以延后一个 tick 再强制退出。
+      setImmediate(() => {
+        console.log('[updater] 退出时自动安装，强制退出')
+        app.exit(0)
+      })
+    }
+  })
 
   // 指定更新源（必须在第一次 checkForUpdates 之前）
   applyFeed(0)
@@ -179,6 +206,7 @@ export function setupAutoUpdater(getter) {
 
   autoUpdater.on('update-downloaded', (info) => {
     retrying = false
+    downloaded = true
     send('update-downloaded', {
       version: info.version,
       releaseNotes: normalizeNotes(info.releaseNotes),
@@ -245,11 +273,26 @@ async function runCheck() {
     }
   })
 
-  ipcMain.handle('updater:quit-install', () => {
+  ipcMain.handle('updater:quit-install', async () => {
+    if (installing) return { ok: true }
+    installing = true
+    // 先把 ffmpeg 子进程、UDP 发现、TCP 信令、SQLite 句柄都放掉，
+    // 让安装器启动时这个进程已经"轻到能立刻消失"。
     try {
-      autoUpdater.quitAndInstall(false, true)
+      if (typeof cleanupBeforeUpdate === 'function') cleanupBeforeUpdate()
     } catch (e) {
-      send('error', { message: (e && e.message) || String(e) })
+      console.warn('[updater] 更新前清理异常（忽略）:', (e && e.message) || e)
+    }
+    try {
+      // 第一个参数 isSilent=false：显示安装界面（有进度条，用户知道发生了什么）
+      // 第二个参数 isForceRunAfter=true：装完自动重新启动程序
+      autoUpdater.quitAndInstall(false, true)
+      return { ok: true }
+    } catch (e) {
+      installing = false
+      const message = (e && e.message) || String(e)
+      send('error', { message: '启动安装失败：' + message })
+      return { error: message }
     }
   })
 

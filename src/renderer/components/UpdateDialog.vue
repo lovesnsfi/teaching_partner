@@ -67,7 +67,7 @@
         v-if="channel === 'update-downloaded'"
         class="mt-3 text-[12px] text-slate-400 leading-relaxed"
       >
-        现在重启立即生效；若选择「稍后」，程序会在你下次退出时自动完成安装。
+        现在重启立即生效；若选择「稍后」，程序会在你下次退出时自动完成安装。点「关闭程序并更新」后本程序会自动关闭并静默完成安装，无需手动操作。
       </p>
     </div>
 
@@ -79,7 +79,9 @@
       >
       <template v-else-if="channel === 'update-downloaded'">
         <el-button @click="$emit('update:visible', false)">稍后</el-button>
-        <el-button type="primary" @click="$emit('install')">立即重启</el-button>
+        <el-button type="primary" @click="$emit('install')">
+          关闭程序并更新
+        </el-button>
       </template>
       <template v-else>
         <el-button @click="$emit('update:visible', false)">关闭</el-button>

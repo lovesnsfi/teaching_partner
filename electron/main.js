@@ -29,6 +29,7 @@ import {
   listAvDevices,
   startRecording,
   stopRecording,
+  killRecording,
   isRecording
 } from './recorder.js'
 import {
@@ -152,6 +153,96 @@ function showWindow() {
   win.setSkipTaskbar(false)
   win.show()
   win.focus()
+}
+
+// ===== 退出确认：避免误中断进行中的任务 =====
+// 广播状态只存在于渲染层（store.broadcast.teacherActive），主进程看不到，
+// 因此由渲染层在状态变化时通过 activity:report 主动上报。
+let broadcastActive = false
+let quitting = false
+
+// 汇总当前正在进行、会被退出打断的任务
+function collectActiveTasks() {
+  const tasks = []
+  // 录屏（ffmpeg 子进程）
+  try {
+    if (isRecording()) tasks.push('正在录屏')
+  } catch {
+    /* ignore */
+  }
+  // 文件接收：正在收 / 等本端点确认
+  if (fileRecv.size > 0) tasks.push(`正在接收文件（${fileRecv.size} 个）`)
+  if (pendingIn.size > 0) {
+    tasks.push(`有 ${pendingIn.size} 个文件等待你确认接收`)
+  }
+  // 文件发送：已发请求且对方已确认、还没发完（sendState 会在发完后删除）
+  let sending = 0
+  for (const fileId of sendState.keys()) {
+    const spec = pendingOut.get(fileId)
+    if (spec && spec.granted && spec.granted.size > 0) sending++
+  }
+  if (sending > 0) tasks.push(`正在发送文件（${sending} 个）`)
+  // 屏幕广播（渲染层上报）
+  if (broadcastActive) tasks.push('正在屏幕广播')
+  return tasks
+}
+
+// 真正的退出动作（确认通过后或本来就没有任务时调用）
+function doQuit() {
+  quitting = true
+  forceQuit = true
+  // 录屏中的 ffmpeg 子进程：不杀会残留进程，并继续写出残缺的 mp4
+  try {
+    if (killRecording()) console.log('[quit] 已终止录屏进程（ffmpeg）')
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (discovery) discovery.destroy()
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (signaling) signaling.destroy()
+  } catch {
+    /* ignore */
+  }
+  app.quit()
+}
+
+// 退出入口：有任务在跑时先弹确认框
+async function confirmAndQuit() {
+  if (quitting) return
+  const tasks = collectActiveTasks()
+  if (tasks.length > 0) {
+    // 窗口可能已最小化到托盘，先拉回来，否则确认框会藏在后面看不见
+    showWindow()
+    if (win) {
+      try {
+        win.focus()
+      } catch {
+        /* ignore */
+      }
+      await new Promise((r) => setTimeout(r, 150))
+    }
+    const opts = {
+      type: 'warning',
+      buttons: ['取消', '仍然退出'],
+      defaultId: 0,
+      cancelId: 0,
+      title: '确认退出',
+      message: `当前有 ${tasks.length} 项任务正在进行`,
+      detail:
+        `· ${tasks.join('\n· ')}\n\n` +
+        '退出会立即中断上述任务，文件可能无法完整送达。'
+    }
+    const res = win
+      ? await dialog.showMessageBox(win, opts)
+      : await dialog.showMessageBox(opts)
+    // 只认第二项「仍然退出」
+    if (res.response !== 1) return
+  }
+  doQuit()
 }
 
 // 学生端「屏幕广播」独立观看窗口。
@@ -654,7 +745,9 @@ app.whenReady().then(async () => {
   }
 
   // 自动更新：传入窗口 getter（窗口可由托盘恢复重建，故用函数取值）
-  setupAutoUpdater(() => win)
+  // 与 cleanupBeforeUpdate：点「立即重启安装」时先把占资源的子进程/连接全部收掉，
+  // 否则安装器会检测到"程序还在运行"并要求用户手动关闭。
+  setupAutoUpdater(() => win, cleanupBeforeUpdate)
 
   createWindow()
 
@@ -669,10 +762,7 @@ app.whenReady().then(async () => {
       {
         label: '退出',
         click: () => {
-          forceQuit = true
-          if (discovery) discovery.destroy()
-          if (signaling) signaling.destroy()
-          app.quit()
+          confirmAndQuit()
         }
       }
     ])
@@ -1024,6 +1114,12 @@ app.whenReady().then(async () => {
   ipcMain.handle('broadcast:close', (_, reason) => {
     closeBroadcastWindow(reason || 'closed')
     return true
+  })
+
+  // 渲染层上报活动状态：广播状态只存在于渲染层，主进程退出确认需要知道
+  ipcMain.handle('activity:report', (_, { type, active } = {}) => {
+    if (type === 'broadcast') broadcastActive = !!active
+    return { ok: true }
   })
 
   // 选择文件（可多选），返回 [{ path, name, size, mime }]，未选返回 []
@@ -1414,3 +1510,36 @@ ipcMain.handle('shot:cancel', () => {
 app.on('window-all-closed', () => {
   // 托盘常驻：窗口关闭（隐藏）时不退出，保持 LAN 服务与托盘继续运行
 })
+
+// ===== 更新安装：让程序"干净地消失"，避免安装器报"请手动关闭" =====
+//
+// 背景：electron-updater 的 quitAndInstall() 内部顺序是
+//   install()      → 先 spawn 安装程序
+//   setImmediate() → 再 app.quit()
+// 安装器与本进程赛跑，若本进程退出慢（WebRTC / SQLite / ffmpeg 尚未释放），
+// 安装器就会判定"应用还在运行"并弹出需要手动关闭的提示。
+//
+// 对策：见 updater.js —— 启动安装器前先调用下面这个清理函数，
+// 并在 before-quit 时 app.exit(0) 强制立即退出。
+function cleanupBeforeUpdate() {
+  // 录屏中的 ffmpeg 子进程：不杀的话它会继续运行并写出残缺文件
+  try {
+    if (killRecording()) console.log('[update] 已终止录屏进程（ffmpeg）')
+  } catch (e) {
+    console.warn('[update] 终止录屏失败：', (e && e.message) || e)
+  }
+  // 局域网发现与信令服务：释放 UDP 41234 / TCP 41235
+  try {
+    if (discovery && typeof discovery.destroy === 'function') discovery.destroy()
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (signaling && typeof signaling.destroy === 'function') signaling.destroy()
+  } catch {
+    /* ignore */
+  }
+  discovery = null
+  signaling = null
+  console.log('[update] 资源清理完成，准备安装更新')
+}
