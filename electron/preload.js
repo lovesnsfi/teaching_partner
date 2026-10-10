@@ -12,6 +12,10 @@ const api = {
   // 本地持久化（SQLite / JSON 文件，由主进程选择后端）
   dbLoad: () => ipcRenderer.invoke('db:load'),
   dbSaveSettings: (obj) => ipcRenderer.invoke('db:saveSettings', obj),
+  // 录屏：把渲染层 MediaRecorder 录出的 webm（ArrayBuffer）交给主进程转码为 mp4
+  recorderDevices: () => ipcRenderer.invoke('recorder:devices'),
+  recorderStart: (opts) => ipcRenderer.invoke('recorder:start', opts),
+  recorderStop: () => ipcRenderer.invoke('recorder:stop'),
   // 删除某会话的全部消息（删除联系人时同步清理聊天记录）
   dbDeleteMessages: (convId) => ipcRenderer.invoke('db:deleteMessages', convId),
   dbReplaceGroups: (groups) => ipcRenderer.invoke('db:replaceGroups', groups),
@@ -53,12 +57,14 @@ const api = {
   closeBroadcastWindow: (reason) => ipcRenderer.invoke('broadcast:close', reason),
   onBroadcastClosed: (cb) =>
     ipcRenderer.on('lan:broadcast-closed', (_e, p) => cb(p || {})),
-  // 选择文件，返回 { path, name, size, mime } 或 null
+  // 选择文件（可多选），返回 [{ path, name, size, mime }]，未选返回 []
   pickFile: () => ipcRenderer.invoke('pick:file'),
   // 用系统默认浏览器打开外部链接（仅 https）
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
-  // 选择图片（聊天内联显示）
+  // 选择图片（可多选），返回 [{ path, name, size, mime }]，未选返回 []
   pickImage: () => ipcRenderer.invoke('pick:image'),
+  // 选择文件夹（录屏保存目录）
+  pickFolder: () => ipcRenderer.invoke('pick:folder'),
   // 保存剪贴板里的图片（Ctrl+V 粘贴截图），返回 { path, name, size, mime }
   saveClipboardImage: (dataUrl, mime) =>
     ipcRenderer.invoke('save:clipboardImage', dataUrl, mime),

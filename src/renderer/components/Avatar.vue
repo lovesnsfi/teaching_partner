@@ -34,7 +34,7 @@ const src = computed(() => avatarSrc(props.avatar))
 
 <template>
   <span
-    class="rounded-full overflow-hidden grid place-items-center font-semibold text-white flex-none shrink-0"
+    class="rounded-[6px] overflow-hidden grid place-items-center font-semibold text-white flex-none shrink-0"
     :class="online ? '' : 'opacity-60'"
     :style="{
       width: size + 'px',

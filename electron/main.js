@@ -26,6 +26,12 @@ import {
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import {
+  listAvDevices,
+  startRecording,
+  stopRecording,
+  isRecording
+} from './recorder.js'
+import {
   LanDiscovery,
   getLanIp,
   getSelectedIp,
@@ -836,6 +842,35 @@ app.whenReady().then(async () => {
       /* ignore */
     }
   })
+
+  // ===== 录屏：ffmpeg 主进程单遍采集 + 编码 =====
+  // 列出可用音视频设备（视频/麦克风/系统声音），供设置页与录制选择
+  ipcMain.handle('recorder:devices', async () => {
+    try {
+      return await listAvDevices()
+    } catch (e) {
+      return { video: [], audioInput: [], audioLoopback: [], error: String(e) }
+    }
+  })
+
+  // 开始录制。opts 见 recorder.js startRecording
+  ipcMain.handle('recorder:start', async (_, opts) => {
+    try {
+      return await startRecording(opts || {})
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) }
+    }
+  })
+
+  // 停止录制，返回最终 mp4 路径
+  ipcMain.handle('recorder:stop', async () => {
+    try {
+      if (!isRecording()) return { ok: false, error: '当前没有录制' }
+      return await stopRecording()
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) }
+    }
+  })
   ipcMain.handle('db:replaceGroups', (_, groups) => {
     try {
       if (persist) persist.replaceGroups(groups || [])
@@ -991,20 +1026,33 @@ app.whenReady().then(async () => {
     return true
   })
 
-  // 选择文件（返回本地 path 与元数据）
+  // 选择文件（可多选），返回 [{ path, name, size, mime }]，未选返回 []
   ipcMain.handle('pick:file', async () => {
     const res = await dialog.showOpenDialog(win, {
-      properties: ['openFile'],
+      properties: ['openFile', 'multiSelections'],
       title: '选择要发送的文件'
     })
+    if (res.canceled || !res.filePaths.length) return []
+    return res.filePaths
+      .map((p) => {
+        try {
+          const st = statSync(p)
+          return { path: p, name: basename(p), size: st.size, mime: mimeOf(p) }
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+  })
+
+  // 选择文件夹（录屏保存目录）
+  ipcMain.handle('pick:folder', async () => {
+    const res = await dialog.showOpenDialog(win, {
+      properties: ['openDirectory'],
+      title: '选择录屏保存目录'
+    })
     if (res.canceled || !res.filePaths.length) return null
-    const p = res.filePaths[0]
-    try {
-      const st = statSync(p)
-      return { path: p, name: basename(p), size: st.size, mime: '' }
-    } catch {
-      return null
-    }
+    return res.filePaths[0]
   })
 
   // 保存剪贴板里的图片（Ctrl+V 粘贴截图）到临时目录，返回 { path, name, size, mime }
@@ -1028,10 +1076,10 @@ app.whenReady().then(async () => {
     }
   })
 
-  // 选择图片（聊天里直接内联显示，不走"文件卡片"那种形态）
+  // 选择图片（可多选），聊天内联显示，返回 [{ path, name, size, mime }]，未选返回 []
   ipcMain.handle('pick:image', async () => {
     const res = await dialog.showOpenDialog(win, {
-      properties: ['openFile'],
+      properties: ['openFile', 'multiSelections'],
       filters: [
         {
           name: '图片',
@@ -1040,14 +1088,17 @@ app.whenReady().then(async () => {
       ],
       title: '选择要发送的图片'
     })
-    if (res.canceled || !res.filePaths.length) return null
-    const p = res.filePaths[0]
-    try {
-      const st = statSync(p)
-      return { path: p, name: basename(p), size: st.size, mime: mimeOf(p) }
-    } catch {
-      return null
-    }
+    if (res.canceled || !res.filePaths.length) return []
+    return res.filePaths
+      .map((p) => {
+        try {
+          const st = statSync(p)
+          return { path: p, name: basename(p), size: st.size, mime: mimeOf(p) }
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
   })
 
   // 读取已落盘的图片并转成 data URI，供渲染层 <img> 直接显示

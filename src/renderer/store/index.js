@@ -46,6 +46,22 @@ export const useStore = defineStore('app', {
       broadcastQuality: 'hd', // 屏幕广播画质：sd 标清 | hd 高清 | origin 原画
       broadcastFps: 30, // 屏幕广播帧率：15 | 30 | 60
       lastShot: null, // 最近一次框选截屏生成的图片文件（已在剪贴板中）
+      // 录屏配置（持久化）
+      recorder: {
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        mic: true, // 采集麦克风（解说人声）
+        systemAudio: true, // 采集系统声音（走 ffmpeg wasapi loopback，比桌面采集器可靠）
+        camera: true, // 叠加摄像头画中画
+        cameraSize: 'small', // small | large
+        saveDir: '', // 空 = 视频目录/局域网沟通广播
+        encoder: 'auto', // auto | libx264 | h264_nvenc
+        micDevice: '', // 麦克风设备名（空=自动选第一个输入设备）
+        systemDevice: '', // 系统声音设备名（空=自动选第一个 wasapi 设备）
+        cameraDevice: '' // 摄像头设备名（空=自动选第一个视频设备）
+      },
+      recorderDevices: { video: [], audioInput: [], audioLoopback: [] },
       status: 'init'
     }
   },
@@ -128,7 +144,8 @@ export const useStore = defineStore('app', {
           name: this.self.name,
           selectedInterface: this.selectedInterface,
           broadcastQuality: this.broadcastQuality,
-          broadcastFps: this.broadcastFps
+          broadcastFps: this.broadcastFps,
+          recorder: this.recorder
         })
       } catch {
         /* ignore */
@@ -383,6 +400,22 @@ export const useStore = defineStore('app', {
       if ([15, 30, 60].includes(Number(s.broadcastFps))) {
         this.broadcastFps = Number(s.broadcastFps)
       }
+      // 录屏配置：合并已保存项（简单深合并，覆盖默认值中的对应字段）
+      if (s.recorder && typeof s.recorder === 'object') {
+        this.recorder = {
+          ...this.recorder,
+          ...s.recorder,
+          cameraSize: ['small', 'large'].includes(s.recorder.cameraSize)
+            ? s.recorder.cameraSize
+            : this.recorder.cameraSize,
+          encoder: ['auto', 'libx264', 'h264_nvenc'].includes(s.recorder.encoder)
+            ? s.recorder.encoder
+            : this.recorder.encoder,
+          fps: [15, 30, 60].includes(Number(s.recorder.fps))
+            ? Number(s.recorder.fps)
+            : this.recorder.fps
+        }
+      }
       this.selectedInterface = s.selectedInterface || 'auto'
       this.groups = dbData.groups || []
       this.messages = dbData.messages || {}
@@ -580,25 +613,6 @@ export const useStore = defineStore('app', {
       if (!code) return
       this._dispatch('sticker', { sticker: code })
     },
-    // 选择图片并发送。
-    // 传输仍走文件通道（分片 + 对方确认 + 进度），但消息带 image/* 的 mime，
-    // 渲染层据此内联显示为图片而不是文件卡片。
-    async sendImageFromPicker() {
-      const id = this.activeChatId
-      if (!id) return
-      const file = await window.api.pickImage()
-      if (!file) return
-      this._sendFileToConversation(id, file)
-    },
-
-    async sendFileFromPicker() {
-      const id = this.activeChatId
-      if (!id) return
-      const file = await window.api.pickFile()
-      if (!file) return
-      this._sendFileToConversation(id, file)
-    },
-
     // 框选截屏：主进程隐藏主窗口抓底图 → 全屏框选层 → 裁剪后写入剪贴板。
     // 按需求**不自动发送**，用户自行粘贴到聊天框。
     async beginScreenshot() {
@@ -915,6 +929,16 @@ export const useStore = defineStore('app', {
         this.sources = s
         return s
       })
+    },
+    // 枚举录屏可用音视频设备（视频/麦克风/系统声音），供设置页选择
+    async loadRecorderDevices() {
+      try {
+        const d = await window.api.recorderDevices()
+        if (d && Array.isArray(d.video)) this.recorderDevices = d
+      } catch {
+        /* ignore */
+      }
+      return this.recorderDevices
     },
     getBroadcaster() {
       if (!broadcaster) broadcaster = new TeacherBroadcaster(makeSendSignal())

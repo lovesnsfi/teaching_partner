@@ -13,15 +13,7 @@
       <span class="text-white/80 text-[13px]"
         >{{ store.self.name }} · {{ store.self.host || store.self.ip }}</span
       >
-      <el-button
-        class="no-drag ml-auto header-btn"
-        size="small"
-        title="设置"
-        @click="showSettings = true"
-      >
-        <el-icon class="mr-1"><Setting /></el-icon>设置
-      </el-button>
-      <div class="no-drag flex items-center gap-1">
+      <div class="no-drag ml-auto flex items-center gap-1">
         <button
           class="win-btn"
           title="最小化到托盘"
@@ -45,10 +37,60 @@
         </button>
       </div>
     </header>
-    <main class="flex-1 grid grid-cols-[260px_1fr_360px] min-h-0">
-      <DeviceList />
-      <ChatPanel />
-      <BroadcastView />
+    <main class="flex-1 flex min-h-0">
+      <!-- 左侧主导航：聊天 / 广播 / 设置 -->
+      <nav
+        class="w-[64px] flex-none bg-slate-50 border-r border-slate-200 flex flex-col items-center py-3 gap-2 select-none"
+      >
+        <button
+          class="nav-btn"
+          :class="{ active: currentTab === 'chat' }"
+          title="聊天"
+          @click="currentTab = 'chat'"
+        >
+          <el-icon><ChatRound /></el-icon>
+          <span class="nav-label">聊天</span>
+        </button>
+        <button
+          class="nav-btn"
+          :class="{ active: currentTab === 'broadcast' }"
+          title="广播"
+          @click="currentTab = 'broadcast'"
+        >
+          <el-icon><Monitor /></el-icon>
+          <span class="nav-label">广播</span>
+        </button>
+        <button
+          class="nav-btn"
+          :class="{ active: currentTab === 'record' }"
+          title="录屏"
+          @click="currentTab = 'record'"
+        >
+          <el-icon><VideoCamera /></el-icon>
+          <span class="nav-label">录屏</span>
+        </button>
+        <button
+          class="nav-btn mt-auto"
+          title="设置"
+          @click="showSettings = true"
+        >
+          <el-icon><Setting /></el-icon>
+          <span class="nav-label">设置</span>
+        </button>
+      </nav>
+
+      <!-- 主内容区：聊天 / 广播 / 录屏 三视图切换 -->
+      <div class="flex-1 min-h-0 flex">
+        <template v-if="currentTab === 'chat'">
+          <DeviceList class="w-[260px] flex-none" />
+          <ChatPanel class="flex-1 min-w-0" />
+        </template>
+        <BroadcastView
+          v-else-if="currentTab === 'broadcast'"
+          class="flex-1 min-w-0"
+        />
+        <RecorderView v-else class="flex-1 min-w-0" />
+      </div>
     </main>
 
     <SettingsModal v-if="showSettings" @close="showSettings = false" />
@@ -71,11 +113,13 @@ import { loadAvatars } from './avatars.js'
 import DeviceList from './components/DeviceList.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import BroadcastView from './components/BroadcastView.vue'
+import RecorderView from './components/RecorderView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import UpdateDialog from './components/UpdateDialog.vue'
 import Avatar from './components/Avatar.vue'
 
 const store = useStore()
+const currentTab = ref('chat')
 const showSettings = ref(false)
 
 // 自动更新弹窗状态：由主进程经 preload 推送的 updater:event 驱动
@@ -155,5 +199,38 @@ function onClose() {
 /* 自定义窗口控制按钮内的图标尺寸对齐 */
 .win-btn :deep(.el-icon) {
   font-size: 15px;
+}
+
+/* 左侧主导航按钮 */
+.nav-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.nav-btn:hover {
+  background: #f1f5f9;
+  color: #2563eb;
+}
+.nav-btn.active {
+  background: #eff6ff;
+  color: #2563eb;
+}
+.nav-btn :deep(.el-icon) {
+  font-size: 22px;
+  line-height: 1;
+}
+.nav-label {
+  font-size: 11px;
+  line-height: 1;
 }
 </style>

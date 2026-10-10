@@ -28,7 +28,8 @@ import {
   SwitchButton,
   User,
   VideoCamera,
-  VideoPause
+  VideoPause,
+  VideoPlay
 } from '@element-plus/icons-vue'
 import App from './App.vue'
 import ScreenShot from './components/ScreenShot.vue'
@@ -80,7 +81,8 @@ if (isShotWindow) {
     SwitchButton,
     User,
     VideoCamera,
-    VideoPause
+    VideoPause,
+    VideoPlay
   }
   for (const [name, component] of Object.entries(icons)) {
     app.component(name, component)

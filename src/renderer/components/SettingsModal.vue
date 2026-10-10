@@ -40,6 +40,10 @@
             <el-icon><Monitor /></el-icon>
             <span>屏幕广播</span>
           </el-menu-item>
+          <el-menu-item index="record">
+            <el-icon><VideoCamera /></el-icon>
+            <span>录屏</span>
+          </el-menu-item>
           <el-menu-item index="notify">
             <el-icon><Bell /></el-icon>
             <span>通知</span>
@@ -89,7 +93,7 @@
               <button
                 v-for="a in avatarList"
                 :key="a.id"
-                class="rounded-full overflow-hidden border-2 transition"
+                class="rounded-[6px] overflow-hidden border-2 transition"
                 :class="
                   draftAvatar === 'asset:' + a.id
                     ? 'border-blue-500'
@@ -219,6 +223,182 @@
             </p>
           </div>
 
+          <!-- ============ 录屏 ============ -->
+          <div v-else-if="activeTab === 'record'">
+            <div class="mb-4">
+              <div class="text-[15px] font-semibold text-slate-800">录屏</div>
+              <p class="text-[12px] text-slate-400 mt-0.5 leading-relaxed">
+                录制屏幕 + 摄像头画中画 + 声音，保存为 mp4（H264 + AAC）。
+                编码器优先使用 NVIDIA 硬加速（若显卡支持），否则自动回退软编码。
+              </p>
+            </div>
+
+            <div class="text-[13px] font-semibold text-slate-500 mb-2">
+              分辨率
+            </div>
+            <el-select v-model="draftRes" class="w-full">
+              <el-option label="原画（屏幕原始分辨率）" value="original" />
+              <el-option label="1920 × 1080（全高清）" value="1920x1080" />
+              <el-option label="1366 × 768" value="1366x768" />
+              <el-option label="1280 × 720（高清）" value="1280x720" />
+            </el-select>
+
+            <div class="text-[13px] font-semibold text-slate-500 mt-5 mb-2">
+              帧率
+            </div>
+            <el-radio-group v-model="store.recorder.fps" @change="store._saveSettings()">
+              <el-radio-button :value="15">15 帧/秒</el-radio-button>
+              <el-radio-button :value="30">30 帧/秒</el-radio-button>
+              <el-radio-button :value="60">60 帧/秒</el-radio-button>
+            </el-radio-group>
+            <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
+              演示动态视频选 60 帧；看文档/课件 30 帧即可，性能更稳。
+            </p>
+
+            <div class="text-[13px] font-semibold text-slate-500 mt-5 mb-2">
+              采集内容
+            </div>
+            <div class="flex flex-col gap-2">
+              <div
+                class="flex items-center justify-between p-2.5 rounded-lg border border-slate-200"
+              >
+                <div class="pr-3">
+                  <div class="text-[13px] text-slate-700">麦克风</div>
+                  <div class="text-[11px] text-slate-400">解说人声</div>
+                </div>
+                <el-switch
+                  :model-value="store.recorder.mic"
+                  @change="(v) => setRec('mic', v)"
+                />
+              </div>
+              <div
+                class="flex items-center justify-between p-2.5 rounded-lg border border-slate-200"
+              >
+                <div class="pr-3">
+                  <div class="text-[13px] text-slate-700">系统声音</div>
+                  <div class="text-[11px] text-slate-400">
+                    自动探测，部分机器需启用「立体声混音」
+                  </div>
+                </div>
+                <el-switch
+                  :model-value="store.recorder.systemAudio"
+                  @change="(v) => setRec('systemAudio', v)"
+                />
+              </div>
+              <div
+                class="flex items-center justify-between p-2.5 rounded-lg border border-slate-200"
+              >
+                <div class="pr-3">
+                  <div class="text-[13px] text-slate-700">摄像头画中画</div>
+                  <div class="text-[11px] text-slate-400">叠加到画面右下角</div>
+                </div>
+                <el-switch
+                  :model-value="store.recorder.camera"
+                  @change="(v) => setRec('camera', v)"
+                />
+              </div>
+            </div>
+
+            <div class="text-[13px] font-semibold text-slate-500 mt-5 mb-2">
+              采集设备
+            </div>
+            <div class="flex flex-col gap-3">
+              <div>
+                <div class="text-[12px] text-slate-500 mb-1">麦克风设备</div>
+                <el-select
+                  v-model="store.recorder.micDevice"
+                  class="w-full"
+                  clearable
+                  placeholder="默认（第一个输入设备）"
+                  @change="store._saveSettings()"
+                >
+                  <el-option
+                    v-for="d in store.recorderDevices.audioInput"
+                    :key="d"
+                    :label="d"
+                    :value="d"
+                  />
+                </el-select>
+              </div>
+              <div>
+                <div class="text-[12px] text-slate-500 mb-1">系统声音设备</div>
+                <el-select
+                  v-model="store.recorder.systemDevice"
+                  class="w-full"
+                  clearable
+                  placeholder="默认（第一个可用设备）"
+                  @change="store._saveSettings()"
+                >
+                  <el-option
+                    v-for="d in store.recorderDevices.audioLoopback"
+                    :key="d"
+                    :label="d"
+                    :value="d"
+                  />
+                </el-select>
+                <p class="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                  录制电脑播放的声音。自带 ffmpeg 不带 wasapi，主要靠「立体声混音」：
+                  需在 Windows「声音设置 → 更多声音设置 → 录制」里启用它，启用后刷新即可在列表中看到。
+                </p>
+              </div>
+              <div>
+                <div class="text-[12px] text-slate-500 mb-1">摄像头设备</div>
+                <el-select
+                  v-model="store.recorder.cameraDevice"
+                  class="w-full"
+                  clearable
+                  placeholder="默认（第一个视频设备）"
+                  @change="store._saveSettings()"
+                >
+                  <el-option
+                    v-for="d in store.recorderDevices.video"
+                    :key="d"
+                    :label="d"
+                    :value="d"
+                  />
+                </el-select>
+              </div>
+            </div>
+
+            <div class="text-[13px] font-semibold text-slate-500 mt-5 mb-2">
+              摄像头画中画大小
+            </div>
+            <el-radio-group
+              v-model="store.recorder.cameraSize"
+              @change="store._saveSettings()"
+            >
+              <el-radio-button value="small">小</el-radio-button>
+              <el-radio-button value="large">大</el-radio-button>
+            </el-radio-group>
+
+            <div class="text-[13px] font-semibold text-slate-500 mt-5 mb-2">
+              编码器
+            </div>
+            <el-radio-group
+              v-model="store.recorder.encoder"
+              @change="store._saveSettings()"
+            >
+              <el-radio-button value="auto">自动</el-radio-button>
+              <el-radio-button value="libx264">软编码</el-radio-button>
+              <el-radio-button value="h264_nvenc">硬加速</el-radio-button>
+            </el-radio-group>
+
+            <div class="text-[13px] font-semibold text-slate-500 mt-5 mb-2">
+              保存目录
+            </div>
+            <div class="flex items-center gap-2">
+              <div
+                class="flex-1 min-w-0 text-[12px] text-slate-500 break-all bg-slate-50 border border-slate-200 rounded-lg px-3 py-2"
+              >
+                {{ store.recorder.saveDir || '视频 / 局域网沟通广播' }}
+              </div>
+              <el-button @click="chooseFolder">选择</el-button>
+            </div>
+            <p class="text-[12px] text-slate-400 mt-2 leading-relaxed">
+              留空则保存到系统「视频」目录下的「局域网沟通广播」文件夹。
+            </p>
+          </div>
+
           <!-- ============ 通知 ============ -->
           <div v-else-if="activeTab === 'notify'">
             <div class="mb-4">
@@ -304,7 +484,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useStore } from '../store/index.js'
 import { avatarList, loadAvatars } from '../avatars.js'
 import { BROADCAST_QUALITY, BROADCAST_FPS } from '../webrtc.js'
@@ -322,6 +502,13 @@ const draftInterface = ref(store.selectedInterface || 'auto')
 const draftPlaySound = ref(store.playSound !== false)
 const draftQuality = ref(store.broadcastQuality || 'hd')
 const draftFps = ref(store.broadcastFps || 30)
+const draftRes = computed({
+  get: () =>
+    store.recorder.width && store.recorder.height
+      ? `${store.recorder.width}x${store.recorder.height}`
+      : 'original',
+  set: (v) => onRes(v)
+})
 const qualities = Object.values(BROADCAST_QUALITY)
 const fpsOptions = BROADCAST_FPS
 const interfaces = ref([])
@@ -339,6 +526,11 @@ onMounted(async () => {
   }
   try {
     appVersion.value = (await window.api.getAppVersion()) || ''
+  } catch {
+    /* ignore */
+  }
+  try {
+    await store.loadRecorderDevices()
   } catch {
     /* ignore */
   }
@@ -391,6 +583,35 @@ function onFile(e) {
   }
   reader.readAsDataURL(file)
   e.target.value = ''
+}
+
+// 录屏：实时写入 store 并持久化
+function setRec(key, v) {
+  store.recorder[key] = v
+  store._saveSettings()
+}
+function onRes(v) {
+  if (v === 'original') {
+    store.recorder.width = 0
+    store.recorder.height = 0
+  } else {
+    const [w, h] = String(v).split('x')
+    store.recorder.width = Number(w)
+    store.recorder.height = Number(h)
+  }
+  store._saveSettings()
+}
+async function chooseFolder() {
+  if (!window.api || !window.api.pickFolder) return
+  try {
+    const d = await window.api.pickFolder()
+    if (d) {
+      store.recorder.saveDir = d
+      store._saveSettings()
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 async function save() {

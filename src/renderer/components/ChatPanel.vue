@@ -1,5 +1,11 @@
 <template>
-  <section class="flex flex-col bg-white border-r border-slate-200 min-h-0">
+  <section
+    class="relative flex flex-col bg-white border-r border-slate-200 min-h-0"
+    @dragenter.prevent="onDragEnter"
+    @dragover.prevent="onDragOver"
+    @dragleave.prevent="onDragLeave"
+    @drop.prevent="onDrop"
+  >
     <div
       class="px-4 py-3 border-b border-slate-200 flex items-center gap-2 flex-none"
     >
@@ -265,7 +271,7 @@
           <button
             class="tool-btn"
             type="button"
-            @click="store.sendImageFromPicker()"
+            @click="pickImages()"
           >
             <el-icon><Picture /></el-icon>
           </button>
@@ -274,32 +280,60 @@
           <button
             class="tool-btn"
             type="button"
-            @click="store.sendFileFromPicker()"
+            @click="pickFiles()"
           >
             <el-icon><Paperclip /></el-icon>
           </button>
         </el-tooltip>
       </div>
 
-      <!-- 输入区：多行文本框（加高），发送按钮内嵌到右下角 -->
-      <div class="relative mb-2">
-        <el-input
-          v-model="text"
-          type="textarea"
-          resize="none"
-          size="large"
-          @keydown.enter.exact="onEnter"
-          placeholder="输入消息，回车发送（Shift+Enter 换行；可直接粘贴截图）"
-          class="chat-textarea"
-          @paste="onPaste"
-        />
-        <el-button
-          type="primary"
-          class="send-btn absolute bottom-2 right-2"
-          @click="send"
-        >
-          <el-icon class="mr-1"><Promotion /></el-icon>发送
-        </el-button>
+      <!-- 复合输入框：工具栏在上，附件栏与文本区同在一个圆角容器内，更像钉钉/飞书的输入体验 -->
+      <div class="composer-box">
+        <!-- 待发送附件栏：选文件 / 拖拽文件后先暂存于此，点「发送」才真正发起传输 -->
+        <div v-if="pending.length" class="attach-zone">
+          <div
+            v-for="(a, i) in pending"
+            :key="a.id"
+            class="attach-item"
+            :class="{ 'is-image': a.isImage }"
+          >
+            <img v-if="a.isImage && a.thumb" :src="a.thumb" class="attach-thumb" alt="" />
+            <span v-else class="attach-file-icon">📄</span>
+            <div class="attach-meta">
+              <div class="attach-name" :title="a.name">{{ a.name }}</div>
+              <div class="attach-size">{{ fmtSize(a.size) }}</div>
+            </div>
+            <button
+              class="attach-del"
+              type="button"
+              title="移除"
+              @click="removePending(i)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+
+        <!-- 多行文本框，发送按钮内嵌到右下角 -->
+        <div class="relative">
+          <el-input
+            v-model="text"
+            type="textarea"
+            resize="none"
+            size="large"
+            @keydown.enter.exact="onEnter"
+            placeholder="输入消息，回车发送（Shift+Enter 换行；可直接粘贴截图）"
+            class="chat-textarea"
+            @paste="onPaste"
+          />
+          <el-button
+            type="primary"
+            class="send-btn absolute bottom-2 right-2"
+            @click="send"
+          >
+            <el-icon class="mr-1"><Promotion /></el-icon>发送
+          </el-button>
+        </div>
       </div>
 
       <EmojiPicker
@@ -359,6 +393,13 @@
         {{ previewName }} · 点击空白处关闭
       </div>
     </div>
+    <!-- 拖拽文件到聊天窗口时显示的提示遮罩（pointer-events:none，不拦截 drop） -->
+    <div v-if="dragActive" class="drag-overlay">
+      <div class="drag-overlay-inner">
+        <div class="drag-overlay-icon">📥</div>
+        <div class="drag-overlay-text">松开发送文件</div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -373,6 +414,92 @@ import ForwardDialog from './ForwardDialog.vue'
 
 const store = useStore()
 const text = ref('')
+
+// ===== 待发送附件（选文件 / 拖拽后暂存，点「发送」才真正发起传输）=====
+const pending = ref([])
+const dragActive = ref(false)
+let dragDepth = 0
+
+function makeAttachment(f) {
+  if (!f || !f.path) return null
+  const isImage = String(f.mime || '').startsWith('image/')
+  const att = {
+    id:
+      (window.crypto && window.crypto.randomUUID && window.crypto.randomUUID()) ||
+      'a-' + Date.now() + '-' + Math.random().toString(16).slice(2),
+    name: f.name || '未命名文件',
+    size: f.size || 0,
+    mime: f.mime || '',
+    path: f.path,
+    isImage,
+    // 图片异步取缩略图（与 ChatImage 一致，走本地 data URI）；非图片用 null 标记
+    thumb: isImage ? '' : null
+  }
+  if (isImage) {
+    window.api
+      .getFileDataUrl(f.path)
+      .then((d) => {
+        att.thumb = d || ''
+      })
+      .catch(() => {
+        att.thumb = ''
+      })
+  }
+  return att
+}
+
+function addFiles(files) {
+  if (!store.activeChatId) {
+    ElMessage.warning('请先选择要发送的对象')
+    return
+  }
+  const arr = Array.isArray(files) ? files : Array.from(files || [])
+  let added = 0
+  for (const f of arr) {
+    const att = makeAttachment(f)
+    if (att) {
+      pending.value.push(att)
+      added++
+    }
+  }
+  if (added > 0 && arr.length > added) ElMessage.warning('已忽略无法识别的文件')
+}
+
+// 工具栏「文件」按钮：可多选，加入待发送
+async function pickFiles() {
+  const files = await window.api.pickFile()
+  addFiles(files)
+}
+// 工具栏「图片」按钮：可多选，加入待发送（图片仍内联显示）
+async function pickImages() {
+  const files = await window.api.pickImage()
+  addFiles(files)
+}
+function removePending(i) {
+  pending.value.splice(i, 1)
+}
+
+// 拖拽文件到聊天窗口：dragenter/leave 用计数配对，避免子元素穿插导致遮罩闪烁
+function onDragEnter() {
+  dragDepth++
+  dragActive.value = true
+}
+function onDragOver() {
+  dragActive.value = true
+}
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragActive.value = false
+}
+function onDrop(e) {
+  dragDepth = 0
+  dragActive.value = false
+  const dt = e.dataTransfer
+  if (!dt) return
+  // 只处理带本地路径的文件（Electron 拖放才有 path），忽略纯文本拖拽
+  const local = Array.from(dt.files || []).filter((f) => f && f.path)
+  addFiles(local)
+}
 const listEl = ref(null)
 const composerEl = ref(null)
 const showPicker = ref(false)
@@ -561,9 +688,20 @@ function fmtSize(n) {
   return (n / 1024 / 1024).toFixed(1) + ' MB'
 }
 function send() {
-  if (!text.value.trim()) return
-  store.sendChat(text.value)
-  text.value = ''
+  const id = store.activeChatId
+  if (!id) return
+  const hasText = !!text.value.trim()
+  const hasFiles = pending.value.length > 0
+  if (!hasText && !hasFiles) return
+  // 文字与附件各自成一条消息先后发出（现有消息模型为单 kind，无法混排于一条）
+  if (hasText) {
+    store.sendChat(text.value)
+    text.value = ''
+  }
+  for (const att of pending.value) {
+    store._sendFileToConversation(id, att)
+  }
+  pending.value = []
   showPicker.value = false
 }
 // 回车发送，Shift+Enter 换行；中文输入法组合过程中的回车不触发发送
@@ -634,6 +772,7 @@ watch(
   async () => {
     visibleCount.value = PAGE
     loadingMore.value = false
+    pending.value = [] // 切换会话时清空待发送附件，避免发错人
     await nextTick()
     if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight
   }
@@ -754,16 +893,150 @@ watch(
 .tool-btn :deep(.el-icon) {
   font-size: 20px;
 }
+/* 复合输入框容器：工具栏在上，附件栏与文本区在同一边框内 */
+.composer-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 6px;
+  margin-bottom: 8px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.composer-box:focus-within {
+  border-color: #bfdbfe;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.06);
+}
 /* 多行输入框：固定高度约 180px，并留出右下角「发送」按钮的位置 */
 .chat-textarea :deep(.el-textarea__inner) {
   height: 130px;
   line-height: 1.6;
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 10px 12px 46px 12px;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+}
+.chat-textarea :deep(.el-textarea__inner:focus) {
+  box-shadow: none;
 }
 /* 内嵌在输入框右下角的发送按钮 */
 .send-btn {
   border-radius: 10px;
   box-shadow: 0 1px 4px rgba(37, 99, 235, 0.28);
+}
+/* 待发送附件栏：位于复合输入框内部上方，允许换行；整体高度固定，超出竖向滚动，避免撑高输入框 */
+.attach-zone {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  padding: 4px 4px 6px;
+  max-height: 112px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+}
+.attach-zone::-webkit-scrollbar {
+  width: 5px;
+}
+.attach-zone::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+.attach-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  max-width: 230px;
+  padding: 6px 8px 6px 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.attach-item.is-image {
+  padding: 4px;
+}
+.attach-thumb {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex: none;
+  background: #e2e8f0;
+}
+.attach-file-icon {
+  font-size: 22px;
+  flex: none;
+  line-height: 1;
+}
+.attach-meta {
+  min-width: 0;
+  flex: 1;
+}
+.attach-name {
+  font-size: 12px;
+  color: #334155;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.attach-size {
+  font-size: 11px;
+  color: #94a3b8;
+}
+.attach-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  background: #e2e8f0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.attach-del:hover {
+  background: #fecdd3;
+  color: #e11d48;
+}
+/* 拖拽文件提示遮罩 */
+.drag-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(37, 99, 235, 0.08);
+  border: 2px dashed #2563eb;
+  pointer-events: none;
+  border-radius: 8px;
+}
+.drag-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 28px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #2563eb;
+  box-shadow: 0 6px 24px rgba(37, 99, 235, 0.18);
+}
+.drag-overlay-icon {
+  font-size: 40px;
+  line-height: 1;
+}
+.drag-overlay-text {
+  font-size: 15px;
+  font-weight: 600;
 }
 </style>
