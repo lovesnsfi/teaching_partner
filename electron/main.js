@@ -30,7 +30,11 @@ import {
   startRecording,
   stopRecording,
   killRecording,
-  isRecording
+  isRecording,
+  isActive,
+  pauseRecording,
+  resumeRecording,
+  onLevel
 } from './recorder.js'
 import {
   LanDiscovery,
@@ -164,9 +168,9 @@ let quitting = false
 // 汇总当前正在进行、会被退出打断的任务
 function collectActiveTasks() {
   const tasks = []
-  // 录屏（ffmpeg 子进程）
+  // 录屏（ffmpeg 子进程，含已暂停但会话未结束的情况）
   try {
-    if (isRecording()) tasks.push('正在录屏')
+    if (isActive()) tasks.push('正在录屏')
   } catch {
     /* ignore */
   }
@@ -310,6 +314,82 @@ function closeBroadcastWindow(reason = 'closed') {
     w.close()
   } catch {
     /* ignore */
+  }
+}
+
+// ===== 录屏悬浮控制球 =====
+// 一个透明无边框、常驻置顶的小窗口，录屏时浮在屏幕上显示时长，
+// 鼠标悬停展开「暂停 / 停止」按钮。关键点：setContentProtection(true) 把本窗口
+// 排除在屏幕捕获（gdigrab / ddagrab）之外，否则球会被自己录进视频里。
+let floatWin = null
+
+function createFloatWindow() {
+  if (floatWin && !floatWin.isDestroyed()) {
+    floatWin.show()
+    floatWin.focus()
+    return floatWin
+  }
+  floatWin = new BrowserWindow({
+    width: 248,
+    height: 80,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: join(__dirname, '../preload/preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+  // 排除屏幕捕获：避免悬浮球被录屏录进去
+  try {
+    floatWin.setContentProtection(true)
+  } catch {
+    /* ignore */
+  }
+  floatWin.setAlwaysOnTop(true, 'screen-saver')
+  floatWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  const query = { float: 'recorder' }
+  if (RENDERER_DEV_URL) {
+    const url = new URL(RENDERER_DEV_URL)
+    for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v)
+    floatWin.loadURL(url.toString())
+  } else {
+    floatWin.loadFile(join(DIST, 'index.html'), { query })
+  }
+  // 默认放在主屏右上角：窗口右边缘贴屏幕右、顶部贴顶，
+  // 小球固定在窗口右侧，故小球严格位于屏幕右上角（方案 B）。
+  try {
+    const disp = screen.getPrimaryDisplay()
+    const b = disp.workAreaSize
+    floatWin.setPosition(Math.max(0, b.width - 248), 0)
+  } catch {
+    /* ignore */
+  }
+  floatWin.on('closed', () => {
+    floatWin = null
+  })
+  return floatWin
+}
+
+function closeFloatWindow() {
+  const w = floatWin
+  floatWin = null
+  if (w && !w.isDestroyed()) {
+    try {
+      w.destroy()
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -935,6 +1015,18 @@ app.whenReady().then(async () => {
 
   // ===== 录屏：ffmpeg 主进程单遍采集 + 编码 =====
   // 列出可用音视频设备（视频/麦克风/系统声音），供设置页与录制选择
+  // 系统音量电平 → 转发给悬浮球窗口，驱动其波形随真实音量跳动。
+  // 回调在录制期间由 recorder 的电平监测进程以 ~10Hz 触发；floatWin 可能为空（未开悬浮球）。
+  onLevel((level) => {
+    try {
+      if (floatWin && !floatWin.isDestroyed()) {
+        floatWin.webContents.send('recorder:level', level)
+      }
+    } catch {
+      /* ignore */
+    }
+  })
+
   ipcMain.handle('recorder:devices', async () => {
     try {
       return await listAvDevices()
@@ -955,11 +1047,134 @@ app.whenReady().then(async () => {
   // 停止录制，返回最终 mp4 路径
   ipcMain.handle('recorder:stop', async () => {
     try {
-      if (!isRecording()) return { ok: false, error: '当前没有录制' }
+      if (!isActive()) return { ok: false, error: '当前没有录制' }
       return await stopRecording()
     } catch (e) {
       return { ok: false, error: (e && e.message) || String(e) }
     }
+  })
+
+  // 暂停录制（分片方案：定稿当前分片，ffmpeg 退出；继续时再开新分片）
+  ipcMain.handle('recorder:pause', async () => {
+    try {
+      return await pauseRecording()
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) }
+    }
+  })
+
+  // 继续录制（开下一个分片）
+  ipcMain.handle('recorder:resume', async () => {
+    try {
+      return await resumeRecording()
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) }
+    }
+  })
+
+  // ===== 录屏悬浮控制球相关 IPC =====
+  // 打开悬浮球窗口（录屏开始时由主窗口调用）
+  ipcMain.handle('recorder:float-open', () => {
+    createFloatWindow()
+    return { ok: true }
+  })
+  // 关闭悬浮球窗口（录屏结束 / 停止时调用）
+  ipcMain.handle('recorder:float-close', () => {
+    closeFloatWindow()
+    return { ok: true }
+  })
+  // 悬浮球发来的指令（暂停 / 继续 / 停止），转发给主窗口，
+  // 由 RecorderView 真正执行（它持有录屏状态与计时）。
+  ipcMain.handle('recorder:float-cmd', (_, cmd) => {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('recorder:control', cmd || {})
+    }
+    return { ok: true }
+  })
+  // 主窗口把最新状态（录制中 / 暂停 / 保存中）推给悬浮球，驱动其显示
+  ipcMain.handle('recorder:float-state', (_, state) => {
+    if (floatWin && !floatWin.isDestroyed()) {
+      floatWin.webContents.send('recorder:float-state', state || {})
+    }
+    return { ok: true }
+  })
+  // 悬浮球拖动：渲染层发来期望的窗口左边缘坐标，这里按所在显示器的工作区
+  // 权威 clamp 后再 setPosition（与 setPosition 同坐标系，DPI/多屏下精准贴边）
+  // 返回悬浮窗当前真实位置（供渲染层在拖动开始时作为精确起点，避免累积偏移）
+  ipcMain.handle('recorder:float-pos', () => {
+    if (floatWin && !floatWin.isDestroyed()) {
+      try {
+        const [x, y] = floatWin.getPosition()
+        return { ok: true, x, y }
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: false, x: 0, y: 0 }
+  })
+
+  // 悬浮球拖动（增量协议）：渲染层只转发鼠标的相对位移 dx/dy，主进程读取自己的
+  // 当前真实位置后加位移并按所在显示器工作区 clamp。全程不碰绝对坐标换算，无竞态、
+  // 无累积偏移；贴边后松手回拉能立刻跟手（clamp 在真实位置上生效，无死区）。
+  ipcMain.handle('recorder:float-move-by', (_, { dx, dy } = {}) => {
+    if (floatWin && !floatWin.isDestroyed()) {
+      try {
+        const [x, y] = floatWin.getPosition()
+        const [w, h] = floatWin.getSize()
+        let nx = Math.round(x + (dx || 0))
+        let ny = Math.round(y + (dy || 0))
+        const disp = screen.getDisplayNearestPoint({ x: x + w / 2, y: y + h / 2 })
+        const wa = disp.workArea
+        nx = Math.max(wa.x, Math.min(nx, wa.x + wa.width - w))
+        ny = Math.max(wa.y, Math.min(ny, wa.y + wa.height - h))
+        floatWin.setPosition(nx, ny)
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: true }
+  })
+
+  // 悬浮球拖动：渲染层算好期望的窗口左上角坐标发过来；边界 clamp 用 Electron
+  // 自己的 screen 模块按窗口所在显示器工作区权威夹取（与 setPosition 同坐标系）。
+  // 返回 clamp 后的实际落点，让渲染层消除「拖出边界后需往回拽一大段」的死区。
+  ipcMain.handle('recorder:float-move', (_, { x, y } = {}) => {
+    if (floatWin && !floatWin.isDestroyed()) {
+      try {
+        const [w, h] = floatWin.getSize()
+        const cx = Math.round(x)
+        const cy = Math.round(y)
+        const disp = screen.getDisplayNearestPoint({ x: cx + w / 2, y: cy + h / 2 })
+        const wa = disp.workArea
+        const clampedX = Math.max(wa.x, Math.min(cx, wa.x + wa.width - w))
+        const clampedY = Math.max(wa.y, Math.min(cy, wa.y + wa.height - h))
+        floatWin.setPosition(clampedX, clampedY)
+        return { ok: true, x: clampedX, y: clampedY }
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: false, x: 0, y: 0 }
+  })
+  ipcMain.handle('recorder:float-resize', (_, { w, h } = {}) => {
+    if (floatWin && !floatWin.isDestroyed()) {
+      try {
+        const nw = Math.max(1, Math.round(w))
+        const nh = Math.max(1, Math.round(h))
+        const [x, y] = floatWin.getPosition()
+        const [cw, ch] = floatWin.getSize()
+        // 右边缘固定：悬停展开时窗口向左生长，避免面板超出屏幕右边界
+        let nx = x + cw - nw
+        // 按所在屏幕的工作区 clamp，保证整窗始终可见
+        const disp = screen.getDisplayNearestPoint({ x: x + cw / 2, y: y + ch / 2 })
+        const b = disp.workAreaSize
+        nx = Math.max(0, Math.min(nx, Math.max(0, b.width - nw)))
+        floatWin.setBounds({ x: nx, y, width: nw, height: nh })
+      } catch {
+        /* ignore */
+      }
+    }
+    return { ok: true }
   })
   ipcMain.handle('db:replaceGroups', (_, groups) => {
     try {

@@ -174,6 +174,25 @@ onMounted(() => {
     () => store.broadcast.teacherActive,
     () => reportBroadcast()
   )
+  // 录屏悬浮控制球的指令（暂停 / 继续 / 停止 / 标注）：由主进程转发到这里，
+  // 路由到 store 的录屏控制动作。App 常驻，即便切到别的标签页 / 窗口最小化也照常生效。
+  if (window.api && window.api.onRecorderControl) {
+    window.api.onRecorderControl((cmd) => {
+      const a = cmd && cmd.action
+      if (a === 'pause') store.recorderPause()
+      else if (a === 'resume') store.recorderResume()
+      else if (a === 'stop') store.recorderStop()
+      else if (a === 'annotate') {
+        // 画笔：唤起屏幕框选截屏，便于边录边标注
+        if (window.api && window.api.beginScreenshot) {
+          window.api.beginScreenshot()
+        }
+      } else if (a === 'sync') {
+        // 悬浮球挂载后主动请求一次状态，补回「开始录制」时可能丢失的初始推送
+        store.recorderResend()
+      }
+    })
+  }
 })
 
 function reportBroadcast() {

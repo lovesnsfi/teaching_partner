@@ -1,10 +1,40 @@
 import { defineStore } from 'pinia'
+import { ElMessage } from 'element-plus'
 import { TeacherBroadcaster, captureScreen, getQualityProfile } from '../webrtc.js'
 
 // WebRTC 实例放模块级，避免被 Vue 响应式代理导致异常。
 // 说明：学生端的接收器不在这里 —— 它运行在独立的「屏幕广播」观看窗口
 // （见 components/BroadcastWindow.vue），主窗口只负责控制与状态展示。
 let broadcaster = null
+
+// ===== 录屏运行时计时（模块级，避免每帧写响应式状态）=====
+// 计时公式：累计已录毫秒 + (未暂停 ? 当前段已运行毫秒 : 0)
+// 悬浮球窗口用同一公式独立计秒，避免主/浮窗时间漂移。
+let recAccMs = 0
+let recRunStart = 0
+let recPaused = false
+let recTick = 0
+
+function recFmt(ms) {
+  const s = Math.floor(ms / 1000)
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0')
+}
+
+// 把最新状态推给悬浮球（由主进程转发到浮动窗口）
+function recPushFloat() {
+  try {
+    if (window.api && window.api.recorderFloatState) {
+      window.api.recorderFloatState({
+        state: recPaused ? 'paused' : 'recording',
+        accumulatedMs: recAccMs
+      })
+    }
+  } catch {
+    /* ignore */
+  }
+}
 
 function makeSendSignal() {
   return (ip, payload) => window.api.sendSignal(ip, payload)
@@ -62,6 +92,12 @@ export const useStore = defineStore('app', {
         cameraDevice: '' // 摄像头设备名（空=自动选第一个视频设备）
       },
       recorderDevices: { video: [], audioInput: [], audioLoopback: [] },
+      // 录屏运行时状态（与 RecorderView 解耦，使悬浮球的暂停/停止即使切到别的标签页也能生效）
+      // idle | recording | paused | saving
+      recorderState: 'idle',
+      recorderTimer: '00:00',
+      recorderBusy: false,
+      recorderLastFile: '',
       status: 'init'
     }
   },
@@ -145,7 +181,9 @@ export const useStore = defineStore('app', {
           selectedInterface: this.selectedInterface,
           broadcastQuality: this.broadcastQuality,
           broadcastFps: this.broadcastFps,
-          recorder: this.recorder
+          // 取普通对象快照：避免把 Pinia 响应式代理直接经 IPC 结构化克隆，
+          // 杜绝个别运行时下代理序列化丢字段、导致录屏配置重启不生效的可能。
+          recorder: { ...this.recorder }
         })
       } catch {
         /* ignore */
@@ -357,6 +395,121 @@ export const useStore = defineStore('app', {
       }
       return null
     },
+    // ===== 录屏控制（悬浮球与主界面共用同一套，状态收敛于此，跨标签页也不丢）=====
+    async recorderStart(opts) {
+      if (this.recorderState !== 'idle') return { ok: false, error: '已有录制在进行中' }
+      this.recorderBusy = true
+      try {
+        const res = await window.api.recorderStart(opts)
+        if (!res || !res.ok) throw new Error((res && res.error) || '未知错误')
+        recAccMs = 0
+        recRunStart = Date.now()
+        recPaused = false
+        this.recorderState = 'recording'
+        this.recorderTimer = '00:00'
+        if (recTick) clearInterval(recTick)
+        recTick = setInterval(() => {
+          const t = recAccMs + (recPaused ? 0 : Date.now() - recRunStart)
+          this.recorderTimer = recFmt(t)
+        }, 250)
+        // 打开屏幕悬浮控制球并推送初始状态
+        try {
+          await window.api.recorderFloatOpen()
+          recPushFloat()
+        } catch {
+          /* 悬浮球打开失败不阻断录制 */
+        }
+        // 开录前的系统声音可用性警告（如设备打不开、未找到环流设备）
+        if (res.warnings && res.warnings.length) {
+          res.warnings.forEach((w) => ElMessage.warning(w))
+        }
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: (e && e.message) || String(e) }
+      } finally {
+        this.recorderBusy = false
+      }
+    },
+    // 悬浮球挂载后请求一次当前状态：避免「开始录制」时初始状态推送早于
+    // 悬浮球注册监听而被丢失（表现为首次计时显示成一串纪元毫秒）。
+    recorderResend() {
+      recPushFloat()
+    },
+    async recorderPause() {
+      if (this.recorderState !== 'recording' || this.recorderBusy) return
+      this.recorderBusy = true
+      try {
+        const res = await window.api.recorderPause()
+        if (res && res.ok) {
+          recAccMs += Date.now() - recRunStart
+          recPaused = true
+          this.recorderState = 'paused'
+          recPushFloat()
+        } else {
+          ElMessage.error('暂停失败：' + ((res && res.error) || '未知错误'))
+        }
+      } catch (e) {
+        ElMessage.error('暂停失败：' + ((e && e.message) || e))
+      } finally {
+        this.recorderBusy = false
+      }
+    },
+    async recorderResume() {
+      if (this.recorderState !== 'paused' || this.recorderBusy) return
+      this.recorderBusy = true
+      try {
+        const res = await window.api.recorderResume()
+        if (res && res.ok) {
+          recRunStart = Date.now()
+          recPaused = false
+          this.recorderState = 'recording'
+          recPushFloat()
+        } else {
+          ElMessage.error('继续失败：' + ((res && res.error) || '未知错误'))
+        }
+      } catch (e) {
+        ElMessage.error('继续失败：' + ((e && e.message) || e))
+      } finally {
+        this.recorderBusy = false
+      }
+    },
+    async recorderStop() {
+      if (this.recorderState === 'idle' || this.recorderBusy) return
+      this.recorderBusy = true
+      try {
+        // 先让悬浮球进入「保存中」状态
+        try {
+          if (window.api && window.api.recorderFloatState)
+            window.api.recorderFloatState({ state: 'saving' })
+        } catch {
+          /* ignore */
+        }
+        const res = await window.api.recorderStop()
+        if (res && res.ok) {
+          this.recorderLastFile = res.path
+          ElMessage.success('录制完成：' + res.path)
+        } else {
+          ElMessage.error('保存失败：' + ((res && res.error) || '未知错误'))
+        }
+      } catch (e) {
+        ElMessage.error('停止失败：' + ((e && e.message) || e))
+      } finally {
+        if (recTick) clearInterval(recTick)
+        recTick = 0
+        recPaused = false
+        recAccMs = 0
+        this.recorderState = 'idle'
+        this.recorderTimer = '00:00'
+        this.recorderBusy = false
+        // 关掉悬浮球
+        try {
+          if (window.api && window.api.recorderFloatClose) await window.api.recorderFloatClose()
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+
     async init() {
       if (this.status !== 'init') return
       // 从本地持久化（SQLite 或 JSON 文件）载入设置/群/消息

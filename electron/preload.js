@@ -16,6 +16,27 @@ const api = {
   recorderDevices: () => ipcRenderer.invoke('recorder:devices'),
   recorderStart: (opts) => ipcRenderer.invoke('recorder:start', opts),
   recorderStop: () => ipcRenderer.invoke('recorder:stop'),
+  // 录屏暂停 / 继续（分片方案）
+  recorderPause: () => ipcRenderer.invoke('recorder:pause'),
+  recorderResume: () => ipcRenderer.invoke('recorder:resume'),
+  // 录屏悬浮控制球：打开 / 关闭 / 拖拽移动 / 展开尺寸 / 发送指令 / 接收状态
+  recorderFloatOpen: () => ipcRenderer.invoke('recorder:float-open'),
+  recorderFloatClose: () => ipcRenderer.invoke('recorder:float-close'),
+  recorderFloatCmd: (cmd) => ipcRenderer.invoke('recorder:float-cmd', cmd),
+  recorderFloatState: (state) => ipcRenderer.invoke('recorder:float-state', state),
+  recorderFloatMove: (x, y) => ipcRenderer.invoke('recorder:float-move', { x, y }),
+  recorderFloatMoveBy: (dx, dy) => ipcRenderer.invoke('recorder:float-move-by', { dx, dy }),
+  recorderFloatPos: () => ipcRenderer.invoke('recorder:float-pos'),
+  recorderFloatResize: (w, h) => ipcRenderer.invoke('recorder:float-resize', { w, h }),
+  // 悬浮球指令（主窗口侧接收，由 RecorderView 处理）
+  onRecorderControl: (cb) =>
+    ipcRenderer.on('recorder:control', (_e, p) => cb(p || {})),
+  // 悬浮球状态推送（悬浮球窗口侧接收，由 RecorderFloat 处理）
+  onFloatState: (cb) =>
+    ipcRenderer.on('recorder:float-state', (_e, p) => cb(p || {})),
+  // 系统音量电平推送（悬浮球窗口侧接收，驱动波形；由 recorder 电平监测触发）
+  onRecorderLevel: (cb) =>
+    ipcRenderer.on('recorder:level', (_e, v) => cb(v)),
   // 删除某会话的全部消息（删除联系人时同步清理聊天记录）
   dbDeleteMessages: (convId) => ipcRenderer.invoke('db:deleteMessages', convId),
   dbReplaceGroups: (groups) => ipcRenderer.invoke('db:replaceGroups', groups),
