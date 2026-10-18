@@ -1,3 +1,5 @@
+// Tauri 环境下注入 window.api 适配层（Electron 下由 preload 提供，此处自动跳过）
+import './tauri-api.js'
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'

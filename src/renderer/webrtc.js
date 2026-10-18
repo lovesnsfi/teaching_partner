@@ -305,13 +305,23 @@ export class StudentReceiver {
   }
 }
 
-// 屏幕捕获（Electron desktopCapturer 提供的源）
-// Windows 上「单窗口」捕获走 WGC(Windows Graphics Capture)，窗口被最小化/遮挡、
-// 或分辨率帧率过高时底层会报 ProcessFrame failed (0x80004005) 并复用旧帧（画面卡住）。
-// 因此这里只设上限、绝不设下限：min 约束会让小于该尺寸的窗口直接采集失败。
+// 屏幕捕获。
+// Electron（Chromium 扩展）：chromeMediaSource/desktopCapturer 提供的源 id。
+// Tauri（WebView2）：无 desktopCapturer 扩展，改用标准 getDisplayMedia
+//   （点「开始广播」时弹系统原生选择器，用户自选屏幕/窗口）；
+//   质量约束用 ideal 形式（getDisplayMedia 的 mandatory 约束不被支持）。
+const IS_TAURI =
+  typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+
 export async function captureScreen(sourceId, opts = {}) {
   const { withAudio = false, quality = 'hd', frameRate = 30 } = opts
   const profile = getQualityProfile(quality)
+  if (IS_TAURI) {
+    const video = { frameRate: { ideal: frameRate } }
+    if (profile.maxWidth) video.width = { ideal: profile.maxWidth }
+    if (profile.maxHeight) video.height = { ideal: profile.maxHeight }
+    return navigator.mediaDevices.getDisplayMedia({ video, audio: withAudio })
+  }
   const mandatory = {
     chromeMediaSource: 'desktop',
     chromeMediaSourceId: sourceId,

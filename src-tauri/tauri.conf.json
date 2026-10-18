@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "局域网沟通广播",
+  "version": "0.2.6",
+  "identifier": "com.lan.chat.broadcast",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev:web",
+    "beforeBuildCommand": "npm run build:web"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "局域网沟通广播",
+        "width": 1120,
+        "height": 760,
+        "minWidth": 880,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "teaching_partner",
+    "createUpdaterArtifacts": false,
+    "externalBin": ["binaries/ffmpeg"]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQtZnVuY3Rpb24gaXMgcmVxdWlyZWQ="
+    }
+  }
+}

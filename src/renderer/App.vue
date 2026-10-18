@@ -2,6 +2,7 @@
   <div class="flex flex-col h-full">
     <header
       class="drag-region relative flex items-center gap-3 px-5 h-14 bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md flex-none select-none"
+      data-tauri-drag-region
     >
       <span class="font-bold text-[15px] tracking-wide">局域网沟通广播</span>
       <Avatar
@@ -108,6 +109,7 @@
 
 <script setup>
 import { ref, reactive, watch, onMounted } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { useStore } from './store/index.js'
 import { loadAvatars } from './avatars.js'
 import DeviceList from './components/DeviceList.vue'
@@ -193,7 +195,33 @@ onMounted(() => {
       }
     })
   }
+  // 托盘「退出」菜单 / 标题栏关闭：先判断是否正在广播 / 录制，按需弹确认框
+  if (window.api && window.api.onRequestQuit) {
+    window.api.onRequestQuit(handleQuitRequest)
+  }
 })
+
+// 退出确认：正在广播 / 录制时弹确认框，避免误关丢失内容
+function handleQuitRequest() {
+  const recording = store.recorderState !== 'idle'
+  const broadcasting = !!store.broadcast.teacherActive
+  if (!recording && !broadcasting) {
+    if (window.api) window.api.appQuit()
+    return
+  }
+  const msg = recording
+    ? '正在录屏，退出将丢失当前录像，确定退出吗？'
+    : '正在广播，退出将结束广播，确定退出吗？'
+  ElMessageBox.confirm(msg, '退出确认', {
+    confirmButtonText: '退出',
+    cancelButtonText: '取消',
+    type: 'warning'
+  })
+    .then(() => {
+      if (window.api) window.api.appQuit()
+    })
+    .catch(() => {})
+}
 
 function reportBroadcast() {
   if (window.api && window.api.reportActivity) {

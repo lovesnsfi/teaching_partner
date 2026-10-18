@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口默认权限：核心/窗口/事件 + store/dialog/fs/opener 插件",
+  "windows": ["main", "broadcast-viewer", "shot-overlay", "recorder-float"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "core:window:allow-set-focus",
+    "core:event:default",
+    "store:default",
+    "dialog:default",
+    "fs:default",
+    "opener:default"
+  ]
+}

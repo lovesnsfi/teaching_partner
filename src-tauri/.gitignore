@@ -1,0 +1,13 @@
+# Rust / Cargo 编译产物（体积大，约 8GB，绝不入库）
+/target/
+
+# Tauri 编译期自动生成的 schema 文件（每次构建重新生成，无需提交）
+/gen/
+
+# 外部 sidecar 二进制：ffmpeg（第三方下载，约 105MB，不入库）
+# 重新获取命令（放到本目录）：
+#   下载 https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+#   解压出 bin/ffmpeg.exe → 重命名为 ffmpeg-x86_64-pc-windows-msvc.exe → 放入 binaries/
+# 注意：tauri.conf.json 的 bundle.externalBin 依赖此文件，
+#       缺失时 cargo build 会报 "resource path ... doesn't exist"
+/binaries/
